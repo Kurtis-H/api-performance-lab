@@ -132,14 +132,17 @@ const BUDGETS = {
 // latencyScale loosens the latency budget for scenarios that push past normal
 // load on purpose (stress, spike). Query budgets never loosen: a page that
 // needs more queries under load is a bug at any load.
-export function thresholds({ latencyScale = 1, errorRate = 0.01 } = {}) {
+// latency=false leaves latency out of pass/fail (stress tests report it instead).
+export function thresholds({ latencyScale = 1, errorRate = 0.01, latency = true } = {}) {
   const t = {
     http_req_failed: [`rate<${errorRate}`],
     checks: [`rate>${1 - errorRate}`],
   };
   for (const name of ENDPOINTS) {
     const budget = BUDGETS[name];
-    t[`http_req_duration{name:${name}}`] = [`p(95)<${budget.p95 * latencyScale}`];
+    t[`http_req_duration{name:${name}}`] = latency
+      ? [`p(95)<${budget.p95 * latencyScale}`]
+      : ["p(95)>=0"]; // still listed, so the summary table shows it
     t[`db_queries{name:${name}}`] = [`max<=${budget.queries}`];
   }
   return t;

@@ -1,5 +1,7 @@
 // Stress: keep adding users past expected load to find where it bends.
-// Latency budgets are 3x looser here; errors and query counts are not.
+// Pass/fail is on errors and query budgets only. Latency is reported, not
+// judged: a single worker is expected to slow down past ~240 req/s, and the
+// point of this test is to show where.
 import { summary, thresholds, userJourney, withCounts } from "./lib/traffic.js";
 
 export const options = {
@@ -15,7 +17,7 @@ export const options = {
       ],
     },
   },
-  thresholds: withCounts(thresholds({ latencyScale: 3, errorRate: 0.02 })),
+  thresholds: withCounts(thresholds({ latency: false, errorRate: 0.02 })),
 };
 
 export default function () {
