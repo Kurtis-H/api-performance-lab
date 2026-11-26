@@ -99,16 +99,18 @@ def test_reading_orders_costs_the_same_queries_however_many_items(
         return int(response.headers["X-DB-Queries"])
 
     small_user, big_user = users.key(), users.key()
+    small_headers, big_headers = {"X-API-Key": small_user}, {"X-API-Key": big_user}
     _, seats = new_event(seats=11)
-    small = client.post("/orders", headers={"X-API-Key": small_user}, json={"seat_ids": seats[:1]}).json()
+    small = client.post("/orders", headers=small_headers, json={"seat_ids": seats[:1]}).json()
     big = [
-        client.post("/orders", headers={"X-API-Key": big_user}, json={"seat_ids": pair}).json()
+        client.post("/orders", headers=big_headers, json={"seat_ids": pair}).json()
         for pair in (seats[1:3], seats[3:5], seats[5:7], seats[7:9], seats[9:11])
     ]
 
-    assert queries(client.get("/orders", headers={"X-API-Key": big_user})) == queries(
-        client.get("/orders", headers={"X-API-Key": small_user})
-    )
-    assert queries(client.get(f"/orders/{big[0]['id']}", headers={"X-API-Key": big_user})) == queries(
-        client.get(f"/orders/{small['id']}", headers={"X-API-Key": small_user})
-    )
+    one_order = queries(client.get("/orders", headers=small_headers))
+    five_orders = queries(client.get("/orders", headers=big_headers))
+    assert five_orders == one_order
+
+    one_item = queries(client.get(f"/orders/{small['id']}", headers=small_headers))
+    two_items = queries(client.get(f"/orders/{big[0]['id']}", headers=big_headers))
+    assert two_items == one_item

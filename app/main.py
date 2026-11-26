@@ -445,7 +445,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             id=order.id,
             total_cents=order.total_cents,
             created_at=order.created_at,
-            items=[OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats],
+            items=[
+                OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats
+            ],
         )
 
     @app.get("/orders", response_model=OrderPage, responses=AUTH_RESPONSES, tags=["orders"])
