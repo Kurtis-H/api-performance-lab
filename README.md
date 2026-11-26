@@ -74,7 +74,7 @@ PERF_BUGS=n_plus_one docker compose up -d api    # switch a problem on and watch
 |---|---|---|
 | `smoke.js` | 1 user, 30 s | Everything works and is inside budget |
 | `load.js` | ramp to 50 users, hold 2 min | Per-endpoint p95 and query budgets hold; feeds the CI gate |
-| `stress.js` | 50 → 300 users in steps | Errors < 2%; latency budgets 3x looser |
+| `stress.js` | 50 → 300 users in steps | Errors < 2% and query budgets hold. Latency is reported, not judged: one worker bends at ~240 req/s (p95 ~1 s at 300 users, 0 errors) |
 | `spike.js` | 10 → 300 users in 10 s and back | Nothing fails; reads stay under ~1.5 s p95 on one worker |
 | `soak.js` | 30 users, 30 min (`SOAK_DURATION`) | Memory grows < 5 MB/min after warm-up |
 | `race.js` | 50 users buy one seat at the same instant | Exactly 1 wins |

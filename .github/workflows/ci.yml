@@ -135,7 +135,7 @@ jobs:
       - run: pip install .
       - uses: grafana/setup-k6-action@v1
         with:
-          k6-version: "1.4.2"
+          k6-version: "2.4.0"
       - name: Start the API (1,000,000 seats)
         run: |
           mkdir -p results
