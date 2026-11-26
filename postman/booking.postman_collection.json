@@ -290,6 +290,7 @@
                   "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
                   "const order = pm.response.json();",
                   "pm.test(\"charged the seat price\", () => pm.expect(order.total_cents).to.eql(3000));",
+                  "pm.test(\"names the seat\", () => pm.expect(order.items[0].label).to.match(/^S-\\d+$/));",
                   "pm.collectionVariables.set(\"orderId\", order.id);"
                 ]
               }
@@ -371,7 +372,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
-                  "pm.test(\"contains the seat\", () => pm.expect(pm.response.json().items[0].seat_id).to.eql(Number(pm.collectionVariables.get(\"seatId\"))));"
+                  "pm.test(\"contains the seat\", () => pm.expect(pm.response.json().items[0].seat_id).to.eql(Number(pm.collectionVariables.get(\"seatId\"))));",
+                  "pm.test(\"names the seat the way buyers know it\", () => pm.expect(pm.response.json().items[0].label).to.match(/^S-\\d+$/));"
                 ]
               }
             }

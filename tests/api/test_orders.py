@@ -74,3 +74,43 @@ def test_orders_list_is_newest_first(client: httpx.Client, new_event, user) -> N
     ]
     listed = client.get("/orders", headers=headers).json()["items"]
     assert [o["id"] for o in listed] == list(reversed(ids))
+
+
+def test_order_items_carry_seat_labels(client: httpx.Client, new_event, user) -> None:
+    _, seats = new_event(seats=3)
+    headers = {"X-API-Key": user}
+    order = client.post("/orders", headers=headers, json={"seat_ids": [seats[2], seats[0]]}).json()
+    expected = [{"seat_id": seats[0], "label": "S-1"}, {"seat_id": seats[2], "label": "S-3"}]
+
+    def labels(o: dict) -> list[dict]:
+        return [{"seat_id": i["seat_id"], "label": i["label"]} for i in o["items"]]
+
+    assert labels(order) == expected
+    assert labels(client.get(f"/orders/{order['id']}", headers=headers).json()) == expected
+    assert labels(client.get("/orders", headers=headers).json()["items"][0]) == expected
+
+
+def test_reading_orders_costs_the_same_queries_however_many_items(
+    client: httpx.Client, new_event, users
+) -> None:
+    # The labels come from a join, not a query per item (N+1).
+    def queries(response: httpx.Response) -> int:
+        assert response.status_code == 200
+        return int(response.headers["X-DB-Queries"])
+
+    small_user, big_user = users.key(), users.key()
+    small_headers, big_headers = {"X-API-Key": small_user}, {"X-API-Key": big_user}
+    _, seats = new_event(seats=11)
+    small = client.post("/orders", headers=small_headers, json={"seat_ids": seats[:1]}).json()
+    big = [
+        client.post("/orders", headers=big_headers, json={"seat_ids": pair}).json()
+        for pair in (seats[1:3], seats[3:5], seats[5:7], seats[7:9], seats[9:11])
+    ]
+
+    one_order = queries(client.get("/orders", headers=small_headers))
+    five_orders = queries(client.get("/orders", headers=big_headers))
+    assert five_orders == one_order
+
+    one_item = queries(client.get(f"/orders/{small['id']}", headers=small_headers))
+    two_items = queries(client.get(f"/orders/{big[0]['id']}", headers=big_headers))
+    assert two_items == one_item
