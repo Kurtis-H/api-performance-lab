@@ -1,0 +1,35 @@
+{
+  "endpoints": {
+    "POST /orders": {
+      "p50_ms": 72.95,
+      "p95_ms": 109.07,
+      "queries_max": 5.0,
+      "requests": 695.0
+    },
+    "GET /events": {
+      "p50_ms": 22.02,
+      "p95_ms": 58.27,
+      "queries_max": 2.0,
+      "requests": 2719.0
+    },
+    "GET /events/{id}/stats": {
+      "p50_ms": 5.53,
+      "p95_ms": 99.36,
+      "queries_max": 3.0,
+      "requests": 1131.0
+    },
+    "GET /events/{id}": {
+      "p50_ms": 10.8,
+      "p95_ms": 36.54,
+      "queries_max": 2.0,
+      "requests": 2719.0
+    },
+    "GET /events/{id}/seats": {
+      "p50_ms": 12.32,
+      "p95_ms": 40.48,
+      "queries_max": 2.0,
+      "requests": 3414.0
+    }
+  },
+  "error_rate": 0.0
+}

@@ -1,0 +1,75 @@
+# The whole lab on one machine:
+#
+#   docker compose up -d                        # API (all fixes), Postgres, Prometheus, Grafana
+#   PERF_BUGS=n_plus_one docker compose up -d   # same, with a problem switched on
+#   docker compose run --rm k6 run /scripts/load.js
+#
+# Grafana: http://localhost:3000 (dashboard "Booking API")
+# API docs: http://localhost:8000/docs
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: booking
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d booking"]
+      interval: 2s
+      retries: 30
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/booking
+      PERF_BUGS: ${PERF_BUGS:-}
+      EVENTS: ${EVENTS:-1000}
+      SEATS: ${SEATS:-1000}
+      RATE_LIMIT_PER_MINUTE: "0"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # k6 pushes its own metrics here (experimental-prometheus-rw output).
+      - --web.enable-remote-write-receiver
+      - --enable-feature=native-histograms
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/booking-api.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  k6:
+    image: grafana/k6:1.4.2
+    profiles: ["tools"]
+    environment:
+      BASE_URL: http://api:8000
+      EVENTS: ${EVENTS:-1000}
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: p(50),p(95),max
+    command: ["run", "--out", "experimental-prometheus-rw", "/scripts/load.js"]
+    working_dir: /work
+    volumes:
+      - ./perf/k6:/scripts:ro
+      - ./results:/work/results
+    depends_on:
+      - api

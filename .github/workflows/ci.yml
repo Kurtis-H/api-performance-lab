@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/booking
+
+jobs:
+  test:
+    name: test (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: booking
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install --upgrade pip setuptools
+      - run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type check
+        run: mypy
+      - name: Unit, API, security, concurrency and contract tests
+        run: pytest --cov --cov-report=term-missing --cov-fail-under=80
+      - name: Dependency audit
+        run: pip-audit --skip-editable
+
+  prove:
+    name: Every problem is real and caught
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: booking
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Each test passes when fixed and fails when its problem is on
+        run: python scripts/prove_problems.py
+
+  postman:
+    name: Postman collection (Newman)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: booking
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install .
+      - name: Start the API
+        run: |
+          EVENTS=50 SEATS=100 USERS=20 RATE_LIMIT_PER_MINUTE=60 bash scripts/serve.sh > api.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:8000/health && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - name: Run the collection
+        run: >
+          npx --yes newman@6 run postman/booking.postman_collection.json
+          -e postman/local.postman_environment.json
+          --reporters cli,junit --reporter-junit-export results/newman.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newman-report
+          path: results/newman.xml
+
+  performance:
+    name: Load tests and regression gate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: booking
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      EVENTS: "1000"
+      SEATS: "1000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install .
+      - uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: "1.4.2"
+      - name: Start the API (1,000,000 seats)
+        run: |
+          mkdir -p results
+          bash scripts/serve.sh > api.log 2>&1 &
+          echo $! > api.pid
+          for i in $(seq 1 120); do curl -sf localhost:8000/health && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - name: Smoke
+        run: DURATION=15s k6 run --quiet perf/k6/smoke.js
+      - name: Load (50 users)
+        run: VUS=50 RAMP=10s DURATION=40s k6 run --quiet perf/k6/load.js
+      - name: Regression gate against perf/baseline.json
+        run: python -m perf.compare results/load.json --baseline perf/baseline.json --markdown results/gate.md
+      - name: Post the gate table
+        if: always()
+        run: test -f results/gate.md && cat results/gate.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: 50 buyers, 1 seat
+        run: k6 run --quiet perf/k6/race.js
+      - name: Flash crowd on one event (cache stampede check)
+        run: k6 run --quiet perf/k6/hot_event.js
+      - name: Prove the gate catches a regression (missing index)
+        run: |
+          kill "$(cat api.pid)"; sleep 2
+          PERF_BUGS=missing_index bash scripts/serve.sh > api-broken.log 2>&1 &
+          for i in $(seq 1 120); do curl -sf localhost:8000/health >/dev/null && break; sleep 1; done
+          mkdir -p results/broken
+          VUS=50 RAMP=5s DURATION=20s k6 run --quiet perf/k6/load.js || true
+          mv results/load.json results/broken/load.json
+          if python -m perf.compare results/broken/load.json --baseline perf/baseline.json --markdown results/broken/gate.md; then
+            echo "::error::The gate passed a build with the seat index missing"
+            exit 1
+          fi
+          { echo; echo "<details><summary>Same gate with the index missing (expected to fail)</summary>"; echo; cat results/broken/gate.md; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results
+          path: |
+            results/
+            api*.log
+
+  monitoring:
+    name: Grafana and Prometheus stack
+    runs-on: ubuntu-latest
+    env:
+      EVENTS: "50"
+      SEATS: "100"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: |
+          mkdir -p results && chmod 777 results
+          docker compose up -d --build --wait db api prometheus grafana
+      - name: Prometheus is scraping the API
+        run: |
+          for i in $(seq 1 30); do
+            curl -s localhost:9090/api/v1/targets \
+              | jq -e '.data.activeTargets[] | select(.labels.job=="booking-api") | .health=="up"' && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Grafana has the dashboard
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf localhost:3000/api/dashboards/uid/booking-api \
+              | jq -e '.dashboard.title == "Booking API" and (.dashboard.panels | length) >= 8' && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: k6 pushes its metrics into Prometheus
+        run: |
+          docker compose run --rm -e DURATION=15s k6 run --quiet --out experimental-prometheus-rw /scripts/smoke.js
+          curl -s 'localhost:9090/api/v1/query?query=k6_http_reqs_total' | jq -e '.data.result | length > 0'
+          curl -s 'localhost:9090/api/v1/query?query=db_queries_per_request_count' | jq -e '.data.result | length > 0'
+      - name: Logs
+        if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
