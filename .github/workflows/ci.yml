@@ -104,7 +104,7 @@ jobs:
           npx --yes newman@6 run postman/booking.postman_collection.json
           -e postman/local.postman_environment.json
           --reporters cli,junit --reporter-junit-export results/newman.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: newman-report
@@ -169,7 +169,7 @@ jobs:
             exit 1
           fi
           { echo; echo "<details><summary>Same gate with the index missing (expected to fail)</summary>"; echo; cat results/broken/gate.md; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: k6-results
