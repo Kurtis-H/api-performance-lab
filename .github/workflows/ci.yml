@@ -30,7 +30,7 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -62,7 +62,7 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -85,7 +85,7 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -127,7 +127,7 @@ jobs:
       EVENTS: "1000"
       SEATS: "1000"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -184,7 +184,7 @@ jobs:
       EVENTS: "50"
       SEATS: "100"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Start the stack
         run: |
           mkdir -p results && chmod 777 results
