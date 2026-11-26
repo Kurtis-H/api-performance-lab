@@ -87,6 +87,7 @@ class OrderIn(StrictModel):
 
 class OrderItemOut(BaseModel):
     seat_id: int
+    label: str = Field(description='The seat as buyers know it, such as "R3-12".')
     price_cents: int
 
 

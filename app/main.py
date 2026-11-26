@@ -445,7 +445,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             id=order.id,
             total_cents=order.total_cents,
             created_at=order.created_at,
-            items=[OrderItemOut(seat_id=s.id, price_cents=s.price_cents) for s in seats],
+            items=[OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats],
         )
 
     @app.get("/orders", response_model=OrderPage, responses=AUTH_RESPONSES, tags=["orders"])
@@ -467,11 +467,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         items_by_order: dict[int, list[OrderItemOut]] = {o.id: [] for o in orders}
         if orders:
-            for item in session.execute(
-                select(OrderItem).where(OrderItem.order_id.in_(items_by_order))
-            ).scalars():
+            # One query for every order's items, joined to their seats for the
+            # labels (no extra query per item).
+            for item, label in session.execute(
+                select(OrderItem, Seat.label)
+                .join(Seat, Seat.id == OrderItem.seat_id)
+                .where(OrderItem.order_id.in_(items_by_order))
+                .order_by(OrderItem.id)
+            ):
                 items_by_order[item.order_id].append(
-                    OrderItemOut(seat_id=item.seat_id, price_cents=item.price_cents)
+                    OrderItemOut(seat_id=item.seat_id, label=label, price_cents=item.price_cents)
                 )
         return OrderPage(
             items=[
@@ -500,12 +505,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         order = session.scalar(select(Order).where(Order.id == order_id, Order.user_id == user.id))
         if order is None:
             raise HTTPException(404, "Order not found")
-        items = session.execute(select(OrderItem).where(OrderItem.order_id == order.id)).scalars()
+        items = session.execute(
+            select(OrderItem, Seat.label)
+            .join(Seat, Seat.id == OrderItem.seat_id)
+            .where(OrderItem.order_id == order.id)
+            .order_by(OrderItem.id)
+        )
         return OrderOut(
             id=order.id,
             total_cents=order.total_cents,
             created_at=order.created_at,
-            items=[OrderItemOut(seat_id=i.seat_id, price_cents=i.price_cents) for i in items],
+            items=[
+                OrderItemOut(seat_id=i.seat_id, label=label, price_cents=i.price_cents)
+                for i, label in items
+            ],
         )
 
     @app.post(
