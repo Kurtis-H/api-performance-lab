@@ -28,11 +28,11 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 
 | Layer | Tool | What it checks |
 |---|---|---|
-| API | pytest + httpx against a live server | Behaviour of every endpoint, including the unhappy paths |
+| API | pytest + httpx against a live server | Behavior of every endpoint, including the unhappy paths |
 | Security | pytest | OWASP API Top 10: broken object-level auth, auth, mass assignment, rate limits, admin-only functions, bad input |
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
-| End to end | Postman collection run by Newman | A tester's walkthrough with 27 assertions |
+| End to end | Postman collection run by Newman | A tester's walkthrough with 29 assertions |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
 | Regression gate | `perf/compare.py` | Fails CI if queries per request rise at all, or p95 latency more than doubles |
 | Self-check | `scripts/prove_problems.py` | Each problem's test passes when fixed **and fails when the problem is on** |
