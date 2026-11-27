@@ -122,6 +122,16 @@ A penetration test of this API and booking-web is written up in [booking-pentest
 
 Accepted for the lab, with the reasons in the report: predictable seed keys (BP-01), no limit on anonymous reads (BP-04, which the load tests need), and the public `/metrics` and `X-DB-Queries` (BP-05, which the performance gates read).
 
+## Resilience
+
+[resilience-lab](https://github.com/Kurtis-H/resilience-lab) runs this API with its database failing on purpose (with Toxiproxy), and these fixes came out of it:
+
+| Finding | Fix | Setting |
+|---|---|---|
+| A locked table stalled requests until the lock was released (RL-01) | Every connection gets `lock_timeout` and `statement_timeout`, set by Postgres at connect time, so they cost no queries. A request that hits one gets `503` in seconds, and its thread and connection are free again | `DB_LOCK_TIMEOUT_MS` (3000), `DB_STATEMENT_TIMEOUT_MS` (10000), `DB_CONNECT_TIMEOUT_S` (5) |
+| A database outage returned a bare 500 (RL-02) | Database connection errors and timeouts are answered `503` with `Retry-After: 5`, in the usual JSON error format, and counted in `db_unavailable_total`. For `POST /orders`, the message says to check your orders first, since the failure may have come after the order was saved | |
+| Nothing reported a database outage (RL-03) | `GET /ready` checks the database and answers `503` when it can't reach it. `/health` stays liveness only: the process is up | |
+
 ## Notes
 
 * API keys in the seed data (`key-admin`, `key-user-1` ...) are deliberately predictable test data. Only their hashes are stored.

@@ -101,8 +101,37 @@ def _count_query(*_args: object, **_kwargs: object) -> None:
         counter.count += 1
 
 
-def make_engine(url: str, pool_size: int = 20, max_overflow: int = 30) -> Engine:
-    engine = create_engine(url, pool_size=pool_size, max_overflow=max_overflow, pool_pre_ping=True)
+def make_engine(
+    url: str,
+    pool_size: int = 20,
+    max_overflow: int = 30,
+    *,
+    statement_timeout_ms: int = 0,
+    lock_timeout_ms: int = 0,
+    connect_timeout_s: int = 0,
+) -> Engine:
+    """The engine, with optional time limits on every connection (0 = none).
+
+    The limits are set per connection by Postgres itself (`options`), so they
+    cost no extra queries.
+    """
+    options = []
+    if statement_timeout_ms:
+        options.append(f"-c statement_timeout={statement_timeout_ms}")
+    if lock_timeout_ms:
+        options.append(f"-c lock_timeout={lock_timeout_ms}")
+    connect_args: dict[str, object] = {}
+    if options:
+        connect_args["options"] = " ".join(options)
+    if connect_timeout_s:
+        connect_args["connect_timeout"] = connect_timeout_s
+    engine = create_engine(
+        url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
     event.listen(engine, "before_cursor_execute", _count_query)
     return engine
 
