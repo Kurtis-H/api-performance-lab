@@ -25,7 +25,7 @@ The first load test missed it completely, because the k6 script always sent `lim
 | Memory after 1 min | 90 MB | 141 MB |
 | Throughput | 177 req/s | 109 req/s |
 
-The seat map isn't the only casualty. Every endpoint slowed down, because the CPU was busy serialising 1,000-seat pages for everyone.
+The seat map isn't the only casualty. Every endpoint slowed down, because the CPU was busy serializing 1,000-seat pages for everyone.
 
 ## The fix
 
