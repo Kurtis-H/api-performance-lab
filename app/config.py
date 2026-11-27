@@ -72,6 +72,12 @@ class Settings:
     debug_buffer_size: int = 100
     db_pool_size: int = 20
     db_max_overflow: int = 30
+    # Time limits on every database call (resilience-lab RL-01): a statement,
+    # or a wait for a lock, that runs past them fails with 503 instead of
+    # holding a worker thread and a connection until it finishes.
+    db_statement_timeout_ms: int = 10_000
+    db_lock_timeout_ms: int = 3_000
+    db_connect_timeout_s: int = 5
 
     def has(self, bug: str) -> bool:
         if bug not in KNOWN_BUGS:
@@ -95,4 +101,7 @@ class Settings:
             debug_buffer_size=_int_env("DEBUG_BUFFER_SIZE", 100),
             db_pool_size=_int_env("DB_POOL_SIZE", 20),
             db_max_overflow=_int_env("DB_MAX_OVERFLOW", 30),
+            db_statement_timeout_ms=_int_env("DB_STATEMENT_TIMEOUT_MS", 10_000),
+            db_lock_timeout_ms=_int_env("DB_LOCK_TIMEOUT_MS", 3_000),
+            db_connect_timeout_s=_int_env("DB_CONNECT_TIMEOUT_S", 5),
         )

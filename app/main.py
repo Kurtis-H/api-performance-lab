@@ -18,6 +18,7 @@ from fastapi.routing import APIRoute
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match
@@ -85,6 +86,20 @@ AUTH_THROTTLED = Counter(
     "auth_throttled_total", "Requests refused after too many failed authentications"
 )
 BUYER_CAP_HIT = Counter("buyer_cap_refusals_total", "Orders refused by the per-buyer seat cap")
+DB_UNAVAILABLE = Counter(
+    "db_unavailable_total", "Requests answered 503 because the database failed or timed out"
+)
+
+# Database failures that say nothing about the request itself: the database
+# is unreachable, dropped the connection, or hit a time limit (resilience-lab
+# RL-01, RL-02). They're answered 503 with Retry-After, not 500.
+DATABASE_UNAVAILABLE_ERRORS = (
+    sa_exc.OperationalError,
+    sa_exc.InterfaceError,
+    sa_exc.DisconnectionError,
+    sa_exc.TimeoutError,
+)
+DB_RETRY_AFTER_SECONDS = 5
 
 AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"model": Problem, "description": "Missing or unknown API key"},
@@ -164,7 +179,12 @@ def make_paging_dependency(enforce_limit: bool) -> Callable[..., Paging]:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     engine: Engine = make_engine(
-        settings.database_url, settings.db_pool_size, settings.db_max_overflow
+        settings.database_url,
+        settings.db_pool_size,
+        settings.db_max_overflow,
+        statement_timeout_ms=settings.db_statement_timeout_ms,
+        lock_timeout_ms=settings.db_lock_timeout_ms,
+        connect_timeout_s=settings.db_connect_timeout_s,
     )
     make_session: sessionmaker = make_sessionmaker(engine)
     limiter = RateLimiter(settings.rate_limit_per_minute)
@@ -197,6 +217,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.debug_buffer = debug_buffer
     app.state.limiter = limiter
     app.state.auth_failures = auth_failures
+
+    async def database_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        DB_UNAVAILABLE.inc()
+        detail = "The booking service is temporarily unavailable. Please try again shortly."
+        if request.method == "POST" and request.url.path == "/orders":
+            # The failure may have come after the order was saved: say so.
+            detail += " If you were placing an order, check your orders before trying again."
+        return JSONResponse(
+            {"detail": detail},
+            status_code=503,
+            headers={"Retry-After": str(DB_RETRY_AFTER_SECONDS)},
+        )
+
+    # Handlers are looked up by exception class, so each one is registered.
+    for error in DATABASE_UNAVAILABLE_ERRORS:
+        app.add_exception_handler(error, database_unavailable)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -297,6 +333,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", response_model=HealthOut, tags=["ops"])
     def health() -> HealthOut:
         return HealthOut(status="ok", bugs=sorted(settings.bugs))
+
+    @app.get("/ready", include_in_schema=False)
+    def ready() -> dict[str, str]:
+        """Readiness: can this instance serve requests? (resilience-lab RL-03)
+
+        /health is liveness and stays 200 while the process runs. This checks
+        the database too, so a load balancer can stop sending traffic while
+        it's unreachable; the error handler above turns a failure into 503.
+        """
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"status": "ready"}
 
     @app.get("/metrics", include_in_schema=False)
     def metrics() -> Response:
