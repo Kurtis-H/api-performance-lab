@@ -89,7 +89,7 @@ Every push and pull request runs:
 
 * **test (3.11 / 3.12 / 3.13):** ruff, mypy, all pytest suites with 80% coverage required, pip-audit
 * **Every problem is real and caught:** `prove_problems.py`
-* **Consumer contracts (Pact):** checks out the apps' `pacts/`, replays every interaction against the real API, then runs `scripts/prove_contracts.py`: three breaking changes (a renamed field, 400 instead of 409, 403 instead of 404) must fail the contract, and a change to a field no app uses must not
+* **Consumer contracts (Pact):** checks out the apps' `pacts/`, replays every interaction against the real API, then runs `scripts/prove_contracts.py` once per app: three breaking changes (a renamed field, 400 instead of 409, 403 instead of 404) must fail both contracts, a change to a field no app uses must fail neither, and dropping seat labels from orders must fail booking-web's contract but not booking-mobile's (the mobile app copes without them)
 * **Postman collection (Newman)**
 * **Load tests and regression gate:** seeds 1,000,000 seats, runs smoke, load, race and flash-crowd scenarios, posts the gate table to the job summary, then **switches the missing index on and checks the gate fails**
 * **Grafana and Prometheus stack:** starts the Docker stack, checks the API is scraped, the dashboard loads and k6 metrics arrive
