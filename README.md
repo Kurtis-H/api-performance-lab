@@ -33,6 +33,7 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
 | End to end | Postman collection run by Newman | A tester's walkthrough with 29 assertions |
+| Consumer contracts | [Pact](https://docs.pact.io/) | Replays the contracts [booking-web](https://github.com/Kurtis-H/booking-web) and [booking-mobile](https://github.com/Kurtis-H/booking-mobile) record, so a change that would break either app fails here first |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
 | Regression gate | `perf/compare.py` | Fails CI if queries per request rise at all, or p95 latency more than doubles |
 | Self-check | `scripts/prove_problems.py` | Each problem's test passes when fixed **and fails when the problem is on** |
@@ -88,6 +89,7 @@ Every push and pull request runs:
 
 * **test (3.11 / 3.12 / 3.13):** ruff, mypy, all pytest suites with 80% coverage required, pip-audit
 * **Every problem is real and caught:** `prove_problems.py`
+* **Consumer contracts (Pact):** checks out the apps' `pacts/`, replays every interaction against the real API, then runs `scripts/prove_contracts.py`: three breaking changes (a renamed field, 400 instead of 409, 403 instead of 404) must fail the contract, and a change to a field no app uses must not
 * **Postman collection (Newman)**
 * **Load tests and regression gate:** seeds 1,000,000 seats, runs smoke, load, race and flash-crowd scenarios, posts the gate table to the job summary, then **switches the missing index on and checks the gate fails**
 * **Grafana and Prometheus stack:** starts the Docker stack, checks the API is scraped, the dashboard loads and k6 metrics arrive

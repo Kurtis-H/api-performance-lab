@@ -9,3 +9,4 @@ htmlcov/
 results/
 api*.log
 api.pid
+consumers/
