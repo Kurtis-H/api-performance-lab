@@ -2,13 +2,14 @@
 and lets through the ones that wouldn't.
 
 Each case edits a temporary copy of the repo, then runs
-tests/api/test_consumer_contracts.py in that copy:
+tests/api/test_consumer_contracts.py in that copy, once per consumer:
 
-  breaking   a change an app would notice: the contract test must FAIL
-  safe       a change no app depends on: the contract test must PASS
+  breaking   a change that consumer would notice: its contract must FAIL
+  safe       a change that consumer doesn't depend on: its contract must PASS
 
 A contract test that fails on everything is as useless as one that passes on
-everything, so both directions are checked.
+everything, so both directions are checked. One case breaks only one app: the
+web app needs seat labels on orders, the mobile app copes without them.
 
     python scripts/prove_contracts.py     # needs the consumer pacts in consumers/
 """
@@ -24,7 +25,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# (name, expected result, file, old text, new text)
+CONSUMERS = ("booking-web", "booking-mobile")
+
+# (name, expected result for every consumer or per consumer, edits)
 CASES = [
     (
         "an event field the apps read is renamed",
@@ -58,6 +61,17 @@ CASES = [
         ],
     ),
     (
+        "seat labels are dropped from orders",
+        {"booking-web": "breaking", "booking-mobile": "safe"},
+        [
+            (
+                "app/schemas.py",
+                """such as "R3-12".')""",
+                """such as "R3-12".', exclude=True)""",
+            )
+        ],
+    ),
+    (
         "a stats field no app uses is renamed",
         "safe",
         [
@@ -71,13 +85,14 @@ CASES = [
 IGNORE = shutil.ignore_patterns(".git", ".venv", "__pycache__", "*.egg-info", "results")
 
 
-def run_contract_test(repo_copy: Path) -> bool:
-    """True if the contract test passes in this copy of the repo.
+def run_contract_test(repo_copy: Path, consumer: str) -> bool:
+    """True if this consumer's contract test passes in this copy of the repo.
 
     It runs inside the copy because pytest puts the rootdir first on the import
     path: run from the real repo, it would import the real, unedited app.
     """
-    env = {**os.environ, "REQUIRE_PACTS": "1", "PACT_DIR": str(repo_copy / "consumers")}
+    pacts = repo_copy / "consumers" / consumer
+    env = {**os.environ, "REQUIRE_PACTS": "1", "PACT_DIR": str(pacts)}
     result = subprocess.run(  # noqa: S603
         [
             sys.executable,
@@ -102,10 +117,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         baseline = Path(tmp) / "baseline"
         shutil.copytree(ROOT, baseline, ignore=IGNORE)
-        if not run_contract_test(baseline):
-            print("The contract test fails against the unchanged API; fix that first.")
-            return 1
-        print("unchanged API: contract holds")
+        for consumer in CONSUMERS:
+            if not run_contract_test(baseline, consumer):
+                print(f"{consumer}'s contract fails against the unchanged API; fix that first.")
+                return 1
+        print("unchanged API: every contract holds")
         for i, (name, expected, edits) in enumerate(CASES):
             copy = Path(tmp) / f"case{i}"
             shutil.copytree(ROOT, copy, ignore=IGNORE)
@@ -116,12 +132,14 @@ def main() -> int:
                     print(f"case {name!r}: {old!r} must appear exactly once in {file}")
                     return 1
                 path.write_text(text.replace(old, new))
-            passed = run_contract_test(copy)
-            right = passed if expected == "safe" else not passed
-            verdict = "ok   " if right else "WRONG"
-            outcome = "contract holds" if passed else "contract broken"
-            print(f"{verdict} {expected:8} {name}: {outcome}")
-            wrong += not right
+            for consumer in CONSUMERS:
+                want = expected if isinstance(expected, str) else expected[consumer]
+                passed = run_contract_test(copy, consumer)
+                right = passed if want == "safe" else not passed
+                verdict = "ok   " if right else "WRONG"
+                outcome = "holds" if passed else "broken"
+                print(f"{verdict} {want:8} {name}: {consumer} contract {outcome}")
+                wrong += not right
     return 1 if wrong else 0
 
 
