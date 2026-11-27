@@ -34,6 +34,16 @@ class RateLimiter:
             self._buckets[key] = (tokens, now)
             return (1 - tokens) / self.refill_per_second
 
+    def peek(self, key: str) -> float | None:
+        """Like check(), but takes no token: is this key out of tokens right now?"""
+        if not self.enabled:
+            return None
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (float(self.capacity), now))
+            tokens = min(self.capacity, tokens + (now - last) * self.refill_per_second)
+            return None if tokens >= 1 else (1 - tokens) / self.refill_per_second
+
     @staticmethod
     def retry_after_header(seconds: float) -> str:
         return str(max(1, math.ceil(seconds)))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 
@@ -157,3 +158,32 @@ def test_rate_limit_zero_means_off() -> None:
 @pytest.mark.parametrize(("seconds", "header"), [(0.01, "1"), (1.0, "1"), (1.2, "2")])
 def test_retry_after_rounds_up_to_whole_seconds(seconds: float, header: str) -> None:
     assert RateLimiter.retry_after_header(seconds) == header
+
+
+def test_rate_limiter_peek_takes_no_token() -> None:
+    clock = FakeClock()
+    limiter = RateLimiter(per_minute=2, clock=clock)
+    assert [limiter.peek("k") for _ in range(5)] == [None] * 5  # peeking spends nothing
+    limiter.check("k")
+    limiter.check("k")
+    wait = limiter.peek("k")
+    assert wait is not None and 0 < wait <= 30
+    clock.now += 30  # one token back at 2/min
+    assert limiter.peek("k") is None
+    assert RateLimiter(per_minute=0).peek("k") is None  # off
+
+
+def test_security_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_FAILURES_PER_MINUTE", "5")
+    monkeypatch.setenv("MAX_SEATS_PER_BUYER", "4")
+    settings = Settings.from_env()
+    assert (settings.auth_failures_per_minute, settings.max_seats_per_buyer_per_event) == (5, 4)
+    defaults = Settings()
+    assert (defaults.auth_failures_per_minute, defaults.max_seats_per_buyer_per_event) == (30, 10)
+
+
+def test_keys_hash_to_sha256_hex() -> None:
+    from app.keys import hash_key
+
+    assert hash_key("key-user-1") == hashlib.sha256(b"key-user-1").hexdigest()
+    assert len(hash_key("x")) == 64

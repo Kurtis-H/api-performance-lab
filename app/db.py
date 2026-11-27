@@ -33,7 +33,8 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
-    api_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # SHA-256 of the key, hex; the key itself is never stored (app/keys.py).
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -110,9 +111,42 @@ def make_sessionmaker(engine: Engine) -> sessionmaker:
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
+def _hash_stored_keys(engine: Engine) -> None:
+    """Migrate a database from before keys were hashed (booking-pentest BP-06).
+
+    Hashes each stored key in place and drops the plain-text column, so an
+    existing database keeps working without a reseed and keeps no plain keys.
+    """
+    with engine.begin() as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = 'users'"
+                )
+            )
+        }
+        if "api_key" not in columns:
+            return
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS api_key_hash VARCHAR(64)"))
+        conn.execute(
+            text(
+                "UPDATE users SET api_key_hash = "
+                "encode(sha256(convert_to(api_key, 'UTF8')), 'hex') WHERE api_key_hash IS NULL"
+            )
+        )
+        conn.execute(text("ALTER TABLE users ALTER COLUMN api_key_hash SET NOT NULL"))
+        conn.execute(text("ALTER TABLE users DROP COLUMN api_key"))
+        conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_api_key_hash ON users (api_key_hash)")
+        )
+
+
 def init_db(engine: Engine, with_seat_index: bool = True) -> None:
-    """Create tables, then add or drop the seat lookup index."""
+    """Create tables, migrate stored keys to hashes, then add or drop the seat index."""
     Base.metadata.create_all(engine)
+    _hash_stored_keys(engine)
     with engine.begin() as conn:
         if with_seat_index:
             conn.execute(

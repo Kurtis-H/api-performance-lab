@@ -22,6 +22,7 @@ from sqlalchemy import Engine, text
 
 from app.config import Settings
 from app.db import init_db, make_engine
+from app.keys import hash_key
 from app.main import create_app
 from app.seed import ADMIN_KEY, reset, seed, user_key
 
@@ -59,6 +60,9 @@ def settings() -> Settings:
         stats_delay_ms=100,
         stats_ttl_seconds=60.0,
         debug_buffer_size=100,
+        # Many tests send wrong keys on purpose from the same address; the
+        # failed-sign-in throttle has its own test (test_auth_throttle.py).
+        auth_failures_per_minute=0,
     )
 
 
@@ -71,8 +75,8 @@ def engine(settings: Settings) -> Iterator[Engine]:
     with eng.begin() as conn:
         for key in EXTRA_ADMIN_KEYS:
             conn.execute(
-                text("INSERT INTO users (name, api_key, is_admin) VALUES ('Admin', :k, true)"),
-                {"k": key},
+                text("INSERT INTO users (name, api_key_hash, is_admin) VALUES ('Admin', :k, true)"),
+                {"k": hash_key(key)},
             )
     yield eng
     eng.dispose()

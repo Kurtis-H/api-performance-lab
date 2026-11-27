@@ -5,6 +5,7 @@ Search this file for ``settings.has(`` to see each problem next to its fix.
 
 import functools
 import time
+from collections import Counter as Tally
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
-from sqlalchemy import Engine, select, text, update
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match
@@ -35,6 +36,7 @@ from app.db import (
     make_engine,
     make_sessionmaker,
 )
+from app.keys import hash_key
 from app.ratelimit import RateLimiter
 from app.schemas import (
     MAX_JSON_INT,
@@ -79,6 +81,10 @@ DEBUG_BUFFER_ENTRIES = Gauge("debug_buffer_entries", "Seat maps held in the debu
 ORDERS_CREATED = Counter("orders_created_total", "Orders placed")
 ORDER_CONFLICTS = Counter("order_conflicts_total", "Orders refused because a seat was taken")
 RATE_LIMITED = Counter("rate_limited_total", "Requests refused by the rate limiter")
+AUTH_THROTTLED = Counter(
+    "auth_throttled_total", "Requests refused after too many failed authentications"
+)
+BUYER_CAP_HIT = Counter("buyer_cap_refusals_total", "Orders refused by the per-buyer seat cap")
 
 AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"model": Problem, "description": "Missing or unknown API key"},
@@ -162,6 +168,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     make_session: sessionmaker = make_sessionmaker(engine)
     limiter = RateLimiter(settings.rate_limit_per_minute)
+    # Failed authentications, counted per client address (pentest BP-03).
+    auth_failures = RateLimiter(settings.auth_failures_per_minute)
     stats_cache: TTLCache[EventStats] = TTLCache(
         settings.stats_ttl_seconds, single_flight=not settings.has("cache_stampede")
     )
@@ -188,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.stats_cache = stats_cache
     app.state.debug_buffer = debug_buffer
     app.state.limiter = limiter
+    app.state.auth_failures = auth_failures
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -222,6 +231,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             HTTP_LATENCY.labels(request.method, route).observe(elapsed)
             DB_QUERIES.labels(route).observe(counter.count)
         response.headers["X-DB-Queries"] = str(counter.count)
+        if "x-api-key" in request.headers:
+            # A response to an authenticated request is that buyer's data: never
+            # let a browser or a shared proxy keep a copy (pentest BP-08).
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     def get_session() -> Iterator[Session]:
@@ -234,16 +247,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
     def current_user(
+        request: Request,
         key: Annotated[str | None, Depends(api_key_header)],
     ) -> AuthUser:
         if not key:
             raise HTTPException(401, "Missing X-API-Key header")
+        # A client that keeps presenting wrong keys is refused before the lookup,
+        # so it can't keep guessing at full speed (pentest BP-03). Checked first:
+        # answering 401 vs 200 after the limit would still confirm a guess.
+        client = request.client.host if request.client else "unknown"
+        blocked = auth_failures.peek(client)
+        if blocked is not None:
+            AUTH_THROTTLED.inc()
+            raise HTTPException(
+                429,
+                "Too many failed sign-ins; try again later",
+                headers={"Retry-After": RateLimiter.retry_after_header(blocked)},
+            )
         # A short session of its own, closed before this function returns, so
         # no connection is held while the request waits for its next thread.
         with make_session() as session:
-            found = session.scalar(select(User).where(User.api_key == key))
+            found = session.scalar(select(User).where(User.api_key_hash == hash_key(key)))
             user = None if found is None else AuthUser(found.id, found.is_admin)
         if user is None:
+            auth_failures.check(client)
             raise HTTPException(401, "Unknown API key")
         wait = limiter.check(key)
         if wait is not None:
@@ -417,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # write unconditionally. Two buyers can both pass the check.
             seats = list(session.execute(select(Seat).where(Seat.id.in_(seat_ids))).scalars())
             _check_seats(seats, seat_ids)
+            _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
             _charge_payment(settings)
             session.execute(update(Seat).where(Seat.id.in_(seat_ids)).values(status="sold"))
         else:
@@ -429,6 +457,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ).scalars()
             )
             _check_seats(seats, seat_ids)
+            _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
             _charge_payment(settings)
             for seat in seats:
                 seat.status = "sold"
@@ -583,6 +612,30 @@ def _check_seats(seats: list[Seat], wanted: list[int]) -> None:
     if any(seat.status != "available" for seat in seats):
         ORDER_CONFLICTS.inc()
         raise HTTPException(409, "One or more seats are already taken")
+
+
+def _check_buyer_cap(session: Session, user: AuthUser, seats: list[Seat], cap: int) -> None:
+    """One buyer may hold at most `cap` seats per event, across orders (pentest BP-02).
+
+    The buyer's row is locked first, so two of their orders running at once
+    can't both pass the count. Seats are already locked, always before the
+    buyer, so the lock order is the same for every order and can't deadlock.
+    """
+    if not cap:
+        return
+    session.execute(select(User.id).where(User.id == user.id).with_for_update())
+    wanted = Tally(seat.event_id for seat in seats)
+    rows = session.execute(
+        select(Seat.event_id, func.count())
+        .join(OrderItem, OrderItem.seat_id == Seat.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(Order.user_id == user.id, Seat.event_id.in_(list(wanted)))
+        .group_by(Seat.event_id)
+    )
+    held = {event: count for event, count in rows}
+    if any(held.get(event, 0) + count > cap for event, count in wanted.items()):
+        BUYER_CAP_HIT.inc()
+        raise HTTPException(409, f"You can hold at most {cap} seats for one event")
 
 
 def _charge_payment(settings: Settings) -> None:
