@@ -109,8 +109,21 @@ monitoring/     Prometheus config and the provisioned Grafana dashboard
 docs/           one write-up per problem, plus findings.md
 ```
 
+## Security
+
+A penetration test of this API and booking-web is written up in [booking-pentest](https://github.com/Kurtis-H/booking-pentest), and these fixes came out of it:
+
+| Finding | Fix | Setting |
+|---|---|---|
+| One account could buy every seat of an event (BP-02) | A buyer may hold at most 10 seats per event, across orders. The buyer's row is locked during the check, so parallel orders can't slip past it. This adds 2 queries to `POST /orders` (5 to 7, and the baseline says so) | `MAX_SEATS_PER_BUYER` (0 turns it off) |
+| Failed sign-ins were never throttled (BP-03) | After 30 wrong keys in a minute from one address, every key from it gets `429` with `Retry-After`. It's checked before the lookup, so a right guess can't be told apart while blocked | `AUTH_FAILURES_PER_MINUTE` (0 turns it off) |
+| Keys were stored in plain text (BP-06) | Only SHA-256 hashes are stored. An existing database is migrated in place at startup | |
+| Authenticated responses could be cached (BP-08) | `Cache-Control: no-store` on every response to a request with a key | |
+
+Accepted for the lab, with the reasons in the report: predictable seed keys (BP-01), no limit on anonymous reads (BP-04, which the load tests need), and the public `/metrics` and `X-DB-Queries` (BP-05, which the performance gates read).
+
 ## Notes
 
-* API keys in the seed data (`key-admin`, `key-user-1` ...) are deliberately predictable test data.
+* API keys in the seed data (`key-admin`, `key-user-1` ...) are deliberately predictable test data. Only their hashes are stored.
 * The payment provider and the heavy reporting query are stand-ins (`PAYMENT_DELAY_MS`, `STATS_DELAY_MS`) so the timing problems behave the way they do in real systems.
 * Single-flight caching is per process. With several workers you'd want it in a shared cache (Redis, for example).

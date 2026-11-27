@@ -57,6 +57,12 @@ class Settings:
     database_url: str = DEFAULT_DATABASE_URL
     # Requests per minute per API key on authenticated endpoints. 0 turns it off.
     rate_limit_per_minute: int = 60
+    # Failed authentications per minute per client address before every key
+    # from it is refused with 429 (pentest BP-03). 0 turns it off.
+    auth_failures_per_minute: int = 30
+    # Seats one buyer may hold for one event, across all their orders
+    # (pentest BP-02). 0 turns it off.
+    max_seats_per_buyer_per_event: int = 10
     # Stand-in for the call to a payment provider while an order is placed.
     payment_delay_ms: int = 50
     # Stand-in for a heavy reporting query behind GET /events/{id}/stats.
@@ -81,6 +87,8 @@ class Settings:
             bugs=parse_bugs(os.environ.get("PERF_BUGS")),
             database_url=os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL),
             rate_limit_per_minute=_int_env("RATE_LIMIT_PER_MINUTE", 60),
+            auth_failures_per_minute=_int_env("AUTH_FAILURES_PER_MINUTE", 30),
+            max_seats_per_buyer_per_event=_int_env("MAX_SEATS_PER_BUYER", 10),
             payment_delay_ms=_int_env("PAYMENT_DELAY_MS", 50),
             stats_delay_ms=_int_env("STATS_DELAY_MS", 100),
             stats_ttl_seconds=_float_env("STATS_TTL_SECONDS", 5.0),

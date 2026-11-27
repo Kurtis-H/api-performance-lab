@@ -4,7 +4,8 @@
 
 API keys are predictable on purpose (``key-admin``, ``key-user-1`` ...) so the
 load tests and the Postman collection can log in. This is lab data, not real
-credentials.
+credentials: a real deployment must issue random keys (booking-pentest BP-01,
+accepted for the lab). Only their SHA-256 hashes are stored.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from sqlalchemy import Engine, text
 
 from app.config import Settings
 from app.db import init_db, make_engine
+from app.keys import hash_key
 
 ADMIN_KEY = "key-admin"
 
@@ -34,13 +36,14 @@ def seed(engine: Engine, events: int, seats_per_event: int, users: int) -> None:
     """Insert users, events and seats in a few set-based statements."""
     with engine.begin() as conn:
         conn.execute(
-            text("INSERT INTO users (name, api_key, is_admin) VALUES ('Admin', :key, true)"),
-            {"key": ADMIN_KEY},
+            text("INSERT INTO users (name, api_key_hash, is_admin) VALUES ('Admin', :key, true)"),
+            {"key": hash_key(ADMIN_KEY)},
         )
         conn.execute(
             text(
-                "INSERT INTO users (name, api_key, is_admin) "
-                "SELECT 'User ' || g, 'key-user-' || g, false "
+                "INSERT INTO users (name, api_key_hash, is_admin) "
+                "SELECT 'User ' || g, "
+                "encode(sha256(convert_to('key-user-' || g, 'UTF8')), 'hex'), false "
                 "FROM generate_series(1, :n) AS g"
             ),
             {"n": users},
