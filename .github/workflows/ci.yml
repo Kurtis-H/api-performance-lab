@@ -71,6 +71,48 @@ jobs:
       - name: Each test passes when fixed and fails when its problem is on
         run: python scripts/prove_problems.py
 
+  contracts:
+    name: Consumer contracts (Pact)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: booking
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The apps that call this API keep their contracts in pacts/ on main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/booking-web
+          path: consumers/booking-web
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/booking-mobile
+          path: consumers/booking-mobile
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: The API honours every consumer's contract
+        env:
+          REQUIRE_PACTS: "1"
+        run: |
+          ls consumers/*/pacts/*.json
+          python -m pytest tests/api/test_consumer_contracts.py -v -p no:cacheprovider
+      - name: Breaking changes fail the contract, harmless ones don't
+        run: python scripts/prove_contracts.py
+
   postman:
     name: Postman collection (Newman)
     runs-on: ubuntu-latest
