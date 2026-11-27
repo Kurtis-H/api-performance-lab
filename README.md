@@ -32,6 +32,7 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 | Security | pytest | OWASP API Top 10: broken object-level auth, auth, mass assignment, rate limits, admin-only functions, bad input |
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
+| Failure handling | pytest, with a locked table and an unreachable database | A lock fails fast with `503`, an outage is `503` with `Retry-After`, `/ready` follows the database. Fault injection against the deployed stack is in [resilience-lab](https://github.com/Kurtis-H/resilience-lab) |
 | End to end | Postman collection run by Newman | A tester's walkthrough with 29 assertions |
 | Consumer contracts | [Pact](https://docs.pact.io/) | Replays the contracts [booking-web](https://github.com/Kurtis-H/booking-web) and [booking-mobile](https://github.com/Kurtis-H/booking-mobile) record, so a change that would break either app fails here first |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
@@ -98,12 +99,15 @@ Every push and pull request runs:
 ## Layout
 
 ```
-app/            FastAPI app, models, cache, rate limiter, seed data
+app/            FastAPI app, models, cache, rate limiters, key hashing, seed data
   main.py       search for settings.has( to see each problem next to its fix
-tests/api/      live-server tests: functional, security, concurrency, contract, problems
+tests/api/      live-server tests: functional, security, pentest fixes, concurrency, failure
+                handling, OpenAPI contract, consumer contracts (Pact), problems
 tests/unit/     config, cache, rate limiter, regression gate
 perf/k6/        k6 scenarios and the shared traffic mix
 perf/compare.py the regression gate; perf/baseline.json is its baseline
+scripts/        prove_problems.py and prove_contracts.py (each check must fail when it should),
+                serve.sh for running the API locally
 postman/        Newman collection and environment
 monitoring/     Prometheus config and the provisioned Grafana dashboard
 docs/           one write-up per problem, plus findings.md
