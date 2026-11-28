@@ -78,9 +78,9 @@ def test_holding_again_replaces_the_hold_and_release_frees_the_seats(
     assert mine.status_code == 200 and mine.json()["seat_ids"] == [seats[1], seats[2]]
     assert seat_ids(client, event_id, "available") == [seats[0]]
 
-    released = client.delete(f"/events/{event_id}/hold", headers={"X-API-Key": user})
-    assert released.status_code == 204
-    assert client.delete(f"/events/{event_id}/hold", headers={"X-API-Key": user}).status_code == 204
+    for _ in range(2):  # releasing twice is fine
+        released = client.delete(f"/events/{event_id}/hold", headers={"X-API-Key": user})
+        assert released.status_code == 204
     assert seat_ids(client, event_id, "available") == seats
     assert client.get(f"/events/{event_id}/hold", headers={"X-API-Key": user}).status_code == 404
 
@@ -116,7 +116,8 @@ def test_bad_holds_are_refused(client: httpx.Client, users, new_event: NewEvent)
     assert hold(client, me, 999_999, seats[:1]).status_code == 404
     assert hold(client, me, event_id, [seats[0], seats[0]]).status_code in (409, 422)
     assert hold(client, me, event_id, seats[:11]).status_code == 422
-    assert client.put(f"/events/{event_id}/hold", json={"seat_ids": seats[:1]}).status_code == 401
+    anonymous = client.put(f"/events/{event_id}/hold", json={"seat_ids": seats[:1]})
+    assert anonymous.status_code == 401
 
     # Sold seats can't be held.
     assert buy(client, me, seats[:8]).status_code == 201
