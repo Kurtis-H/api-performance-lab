@@ -33,7 +33,7 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
 | Failure handling | pytest, with a locked table and an unreachable database | A lock fails fast with `503`, an outage is `503` with `Retry-After`, `/ready` follows the database. Fault injection against the deployed stack is in [resilience-lab](https://github.com/Kurtis-H/resilience-lab) |
-| End to end | Postman collection run by Newman | A tester's walkthrough with 29 assertions |
+| End to end | Postman collection run by Newman | A tester's walkthrough with 35 assertions |
 | Consumer contracts | [Pact](https://docs.pact.io/) | Replays the contracts [booking-web](https://github.com/Kurtis-H/booking-web) and [booking-mobile](https://github.com/Kurtis-H/booking-mobile) record, so a change that would break either app fails here first |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
 | Regression gate | `perf/compare.py` | Fails CI if queries per request rise at all, or p95 latency more than doubles |
@@ -112,6 +112,18 @@ postman/        Newman collection and environment
 monitoring/     Prometheus config and the provisioned Grafana dashboard
 docs/           one write-up per problem, plus findings.md
 ```
+
+## Venue layouts
+
+An event is either one block of seats at one price (`seats` and `price_cents`, row `S`) or a venue layout: up to 4 `sections` front to back, each a price tier with up to 6 rows of up to 40 seats.
+
+```json
+{"name": "Jazz night", "venue": "The Grand", "starts_at": "2027-03-01T19:00:00Z",
+ "sections": [{"name": "Orchestra", "rows": 4, "seats_per_row": 20, "price_cents": 9000},
+              {"name": "Balcony",   "rows": 3, "seats_per_row": 16, "price_cents": 4500}]}
+```
+
+Rows are lettered on across sections (Orchestra A to D, Balcony E to G), skipping I and O, so a label like `E-7` names one seat. Every seat comes back with its `section`, `row` and `number`. The limits are set so that every layout the spec allows fits, which keeps the OpenAPI spec the whole contract: Schemathesis found the first version accepting bodies in the spec that the API then refused. Seats from before layouts are migrated in place at startup, with row and number read back out of their labels.
 
 ## Security
 
