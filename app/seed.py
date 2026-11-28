@@ -28,7 +28,10 @@ def user_key(n: int) -> str:
 def reset(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(
-            text("TRUNCATE order_items, orders, seats, events, users RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE seat_holds, order_items, orders, seats, events, users "
+                "RESTART IDENTITY CASCADE"
+            )
         )
 
 

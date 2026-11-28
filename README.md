@@ -33,7 +33,7 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
 | Failure handling | pytest, with a locked table and an unreachable database | A lock fails fast with `503`, an outage is `503` with `Retry-After`, `/ready` follows the database. Fault injection against the deployed stack is in [resilience-lab](https://github.com/Kurtis-H/resilience-lab) |
-| End to end | Postman collection run by Newman | A tester's walkthrough with 35 assertions |
+| End to end | Postman collection run by Newman | A tester's walkthrough with 47 assertions |
 | Consumer contracts | [Pact](https://docs.pact.io/) | Replays the contracts [booking-web](https://github.com/Kurtis-H/booking-web) and [booking-mobile](https://github.com/Kurtis-H/booking-mobile) record, so a change that would break either app fails here first |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
 | Regression gate | `perf/compare.py` | Fails CI if queries per request rise at all, or p95 latency more than doubles |
@@ -125,13 +125,31 @@ An event is either one block of seats at one price (`seats` and `price_cents`, r
 
 Rows are lettered on across sections (Orchestra A to D, Balcony E to G), skipping I and O, so a label like `E-7` names one seat. Every seat comes back with its `section`, `row` and `number`. The limits are set so that every layout the spec allows fits, which keeps the OpenAPI spec the whole contract: Schemathesis found the first version accepting bodies in the spec that the API then refused. Seats from before layouts are migrated in place at startup, with row and number read back out of their labels.
 
+## Seat holds
+
+A buyer can hold up to 10 seats for 10 minutes (`HOLD_SECONDS`), so no one else can buy them while they decide:
+
+| Request | What it does |
+|---|---|
+| `PUT /events/{id}/hold` `{"seat_ids": [...]}` | Hold these seats, replacing any you already hold for the event, and restart the timer |
+| `GET /events/{id}/hold` | The seats you hold and when the hold ends (`404` if none) |
+| `DELETE /events/{id}/hold` | Let them go. Safe to repeat |
+
+* **Who sees the hold:** held seats are listed with `?status=held` and left out of the available seats and counts, for everyone. The holder buys them with `POST /orders` as usual. Anyone else gets `409` "held by another buyer".
+* **Limits:** the per-buyer limit counts what you own plus what you hold.
+* **Expiry:** a hold just stops counting once it expires, so there's no clean-up job to fail.
+* **Where holds are stored:** in their own small table, not on the seats. Counting available seats stays an index-only scan, which the event list's performance depends on.
+* **Cost:** each order makes one extra query (7 to 8) to check holds.
+
+**Checking holds can't be folded into the seat lock.** It's tempting to join the holds into the `SELECT ... FOR UPDATE` that locks the seats and save the query. But under READ COMMITTED, a query that waited for a lock re-checks only the locked rows, so it misses a hold another buyer committed meanwhile. I tried it: with the join, 3 to 5 of 20 buyers holding one seat at the same instant all "won", and `test_twenty_buyers_hold_one_seat_at_once_exactly_one_gets_it` failed. The check now runs as its own statement after the lock, and a second race test pits a hold against an order 10 times.
+
 ## Security
 
 A penetration test of this API and booking-web is written up in [booking-pentest](https://github.com/Kurtis-H/booking-pentest), and these fixes came out of it:
 
 | Finding | Fix | Setting |
 |---|---|---|
-| One account could buy every seat of an event (BP-02) | A buyer may hold at most 10 seats per event, across orders. The buyer's row is locked during the check, so parallel orders can't slip past it. This adds 2 queries to `POST /orders` (5 to 7, and the baseline says so) | `MAX_SEATS_PER_BUYER` (0 turns it off) |
+| One account could buy every seat of an event (BP-02) | A buyer may hold at most 10 seats per event, across orders. The buyer's row is locked during the check, so parallel orders can't slip past it. This adds 2 queries to `POST /orders` (5 to 7; seat holds later added one more, to 8) | `MAX_SEATS_PER_BUYER` (0 turns it off) |
 | Failed sign-ins were never throttled (BP-03) | After 30 wrong keys in a minute from one address, every key from it gets `429` with `Retry-After`. It's checked before the lookup, so a right guess can't be told apart while blocked | `AUTH_FAILURES_PER_MINUTE` (0 turns it off) |
 | Keys were stored in plain text (BP-06) | Only SHA-256 hashes are stored. An existing database is migrated in place at startup | |
 | Authenticated responses could be cached (BP-08) | `Cache-Control: no-store` on every response to a request with a key | |

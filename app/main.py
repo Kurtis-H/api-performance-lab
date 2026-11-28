@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
-from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy import Engine, delete, func, select, text, update
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -31,6 +31,7 @@ from app.db import (
     OrderItem,
     QueryCounter,
     Seat,
+    SeatHold,
     User,
     current_counter,
     init_db,
@@ -48,6 +49,8 @@ from app.schemas import (
     EventPage,
     EventStats,
     HealthOut,
+    HoldIn,
+    HoldOut,
     OrderIn,
     OrderItemOut,
     OrderOut,
@@ -88,6 +91,10 @@ AUTH_THROTTLED = Counter(
     "auth_throttled_total", "Requests refused after too many failed authentications"
 )
 BUYER_CAP_HIT = Counter("buyer_cap_refusals_total", "Orders refused by the per-buyer seat cap")
+HOLDS_PLACED = Counter("holds_placed_total", "Seat holds placed or replaced")
+HOLD_CONFLICTS = Counter(
+    "hold_conflicts_total", "Holds and orders refused because another buyer held a seat"
+)
 DB_UNAVAILABLE = Counter(
     "db_unavailable_total", "Requests answered 503 because the database failed or timed out"
 )
@@ -108,6 +115,16 @@ AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
     429: {"model": Problem, "description": "Rate limit exceeded"},
 }
 NOT_FOUND: dict[int | str, dict[str, Any]] = {404: {"model": Problem}}
+# Available seats of one event: for sale, minus those someone holds (an
+# unexpired hold on a seat still for sale). Holds are few, so subtracting them
+# is cheap, and counting the seats stays an index-only scan.
+AVAILABLE_ON_EVENT = (
+    "SELECT (SELECT count(*) FROM seats WHERE event_id = :id AND status = 'available') - "
+    "(SELECT count(*) FROM seat_holds h JOIN seats hs ON hs.id = h.seat_id "
+    " AND hs.status = 'available' WHERE h.event_id = :id AND h.expires_at > now())"
+)
+HELD_BY_ANOTHER = "One or more seats are held by another buyer"
+
 BAD_BODY: dict[int | str, dict[str, Any]] = {
     400: {"model": Problem, "description": "Body is not valid JSON"}
 }
@@ -365,19 +382,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ).scalars()
             items = []
             for event in rows:
-                available = session.scalar(
-                    text(
-                        "SELECT count(*) FROM seats WHERE event_id = :id AND status = 'available'"
-                    ),
-                    {"id": event.id},
-                )
+                available = session.scalar(text(AVAILABLE_ON_EVENT), {"id": event.id})
                 items.append(_event_out(event, available or 0))
         else:
             # Fix: count seats for the whole page in the same query.
             result = session.execute(
                 text(
                     "SELECT e.id, e.name, e.venue, e.starts_at, "
-                    "       count(s.id) AS available "
+                    "       count(s.id) - (SELECT count(*) FROM seat_holds h "
+                    "         JOIN seats hs ON hs.id = h.seat_id AND hs.status = 'available' "
+                    "         WHERE h.event_id = e.id AND h.expires_at > now()) AS available "
                     "FROM (SELECT * FROM events ORDER BY id LIMIT :limit OFFSET :offset) e "
                     "LEFT JOIN seats s ON s.event_id = e.id AND s.status = 'available' "
                     "GROUP BY e.id, e.name, e.venue, e.starts_at ORDER BY e.id"
@@ -400,10 +414,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @releases_connection
     def get_event(event_id: EventId, session: SessionDep) -> EventOut:
         event = _require_event(session, event_id)
-        available = session.scalar(
-            text("SELECT count(*) FROM seats WHERE event_id = :id AND status = 'available'"),
-            {"id": event_id},
-        )
+        available = session.scalar(text(AVAILABLE_ON_EVENT), {"id": event_id})
         return _event_out(event, available or 0)
 
     @app.get(
@@ -417,12 +428,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_id: EventId,
         session: SessionDep,
         page: PagingDep,
-        status: Annotated[str, Query(pattern="^(available|sold)$")] = "available",
+        status: Annotated[str, Query(pattern="^(available|held|sold)$")] = "available",
     ) -> SeatPage:
         _require_event(session, event_id)
+        held = (
+            select(SeatHold.seat_id)
+            .where(SeatHold.seat_id == Seat.id, SeatHold.expires_at > func.now())
+            .exists()
+        )
+        wanted = {
+            "available": (Seat.status == "available") & ~held,
+            "held": (Seat.status == "available") & held,
+            "sold": Seat.status == "sold",
+        }[status]
         seats = session.execute(
             select(Seat)
-            .where(Seat.event_id == event_id, Seat.status == status)
+            .where(Seat.event_id == event_id, wanted)
             .order_by(Seat.id)
             .limit(page.limit)
             .offset(page.offset)
@@ -432,7 +453,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 id=s.id,
                 label=s.label,
                 price_cents=s.price_cents,
-                status=s.status,
+                status=status,
                 section=s.section,
                 row=s.row,
                 number=s.number,
@@ -502,6 +523,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # write unconditionally. Two buyers can both pass the check.
             seats = list(session.execute(select(Seat).where(Seat.id.in_(seat_ids))).scalars())
             _check_seats(seats, seat_ids)
+            _check_holds(session, user, seat_ids)
             _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
             _charge_payment(settings)
             session.execute(update(Seat).where(Seat.id.in_(seat_ids)).values(status="sold"))
@@ -515,6 +537,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ).scalars()
             )
             _check_seats(seats, seat_ids)
+            # After the lock, in its own statement: see _check_holds.
+            _check_holds(session, user, seat_ids)
             _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
             _charge_payment(settings)
             for seat in seats:
@@ -536,6 +560,109 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats
             ],
         )
+
+    @app.put(
+        "/events/{event_id}/hold",
+        response_model=HoldOut,
+        responses={
+            **AUTH_RESPONSES,
+            **BAD_BODY,
+            404: {"model": Problem, "description": "The event or a seat does not exist"},
+            409: {
+                "model": Problem,
+                "description": "A seat is sold or held by someone else, or over the buyer limit",
+            },
+        },
+        tags=["holds"],
+    )
+    @releases_connection
+    def hold_seats(event_id: EventId, body: HoldIn, user: UserDep, session: SessionDep) -> HoldOut:
+        """Hold these seats for a while, so no one else can buy them.
+
+        Replaces any seats you already hold for this event, and restarts the
+        timer. Buy them with POST /orders before the hold expires.
+        """
+        _require_event(session, event_id)
+        seat_ids = sorted(set(body.seat_ids))
+        if len(seat_ids) != len(body.seat_ids):
+            raise HTTPException(409, "The same seat is listed twice")
+        # Locked in id order, like orders, so holds and orders can't deadlock.
+        seats = list(
+            session.execute(
+                select(Seat)
+                .where(Seat.id.in_(seat_ids), Seat.event_id == event_id)
+                .order_by(Seat.id)
+                .with_for_update()
+            ).scalars()
+        )
+        _check_seats(seats, seat_ids)
+        _check_holds(session, user, seat_ids)
+        _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
+        # Any hold rows left on these seats are expired or ours.
+        session.execute(
+            delete(SeatHold).where(
+                (SeatHold.user_id == user.id) & (SeatHold.event_id == event_id)
+                | SeatHold.seat_id.in_(seat_ids)
+            )
+        )
+        expires_at = session.scalars(
+            text(
+                "INSERT INTO seat_holds (seat_id, event_id, user_id, expires_at) "
+                "SELECT unnest(CAST(:ids AS bigint[])), :event, :user, "
+                "       now() + make_interval(secs => :secs) "
+                "RETURNING expires_at"
+            ),
+            {"ids": seat_ids, "event": event_id, "user": user.id, "secs": settings.hold_seconds},
+        ).first()
+        session.commit()
+        HOLDS_PLACED.inc()
+        assert expires_at is not None
+        return HoldOut(event_id=event_id, seat_ids=seat_ids, expires_at=expires_at)
+
+    @app.get(
+        "/events/{event_id}/hold",
+        response_model=HoldOut,
+        responses={**AUTH_RESPONSES, 404: {"model": Problem, "description": "No seats held"}},
+        tags=["holds"],
+    )
+    @releases_connection
+    def get_hold(event_id: EventId, user: UserDep, session: SessionDep) -> HoldOut:
+        """The seats you hold for this event, and when the hold ends."""
+        _require_event(session, event_id)
+        rows = session.execute(
+            select(SeatHold.seat_id, SeatHold.expires_at)
+            .join(Seat, Seat.id == SeatHold.seat_id)
+            .where(
+                SeatHold.user_id == user.id,
+                SeatHold.event_id == event_id,
+                SeatHold.expires_at > func.now(),
+                Seat.status == "available",
+            )
+            .order_by(SeatHold.seat_id)
+        ).all()
+        if not rows:
+            raise HTTPException(404, "You don't hold any seats for this event")
+        return HoldOut(
+            event_id=event_id,
+            seat_ids=[r.seat_id for r in rows],
+            expires_at=min(r.expires_at for r in rows),
+        )
+
+    @app.delete(
+        "/events/{event_id}/hold",
+        status_code=204,
+        responses={**AUTH_RESPONSES, **NOT_FOUND},
+        tags=["holds"],
+    )
+    @releases_connection
+    def release_hold(event_id: EventId, user: UserDep, session: SessionDep) -> Response:
+        """Let go of the seats you hold for this event. Safe to repeat."""
+        _require_event(session, event_id)
+        session.execute(
+            delete(SeatHold).where(SeatHold.user_id == user.id, SeatHold.event_id == event_id)
+        )
+        session.commit()
+        return Response(status_code=204)
 
     @app.get("/orders", response_model=OrderPage, responses=AUTH_RESPONSES, tags=["orders"])
     @releases_connection
@@ -704,6 +831,28 @@ def _check_seats(seats: list[Seat], wanted: list[int]) -> None:
     if any(seat.status != "available" for seat in seats):
         ORDER_CONFLICTS.inc()
         raise HTTPException(409, "One or more seats are already taken")
+
+
+def _check_holds(session: Session, user: AuthUser, seat_ids: list[int]) -> None:
+    """Refuse seats someone else holds. Call after locking the seats.
+
+    This must be its own statement, not a join in the locking query: under
+    READ COMMITTED, a query that waits for a row lock re-checks only the locked
+    rows, so a hold another buyer committed while we waited would be missed
+    and both buyers could get the seat.
+    """
+    taken = session.scalar(
+        select(func.count())
+        .select_from(SeatHold)
+        .where(
+            SeatHold.seat_id.in_(seat_ids),
+            SeatHold.user_id != user.id,
+            SeatHold.expires_at > func.now(),
+        )
+    )
+    if taken:
+        HOLD_CONFLICTS.inc()
+        raise HTTPException(409, HELD_BY_ANOTHER)
 
 
 def _check_buyer_cap(session: Session, user: AuthUser, seats: list[Seat], cap: int) -> None:
