@@ -633,6 +633,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         layout = _layout(body)
         # One statement for every seat, however many sections: arrays unnested
         # side by side, so creating an event costs the same queries as before.
+        # ORDER BY the array position, so seat ids follow seating order.
         session.execute(
             text(
                 "INSERT INTO seats "
@@ -640,7 +641,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "SELECT :event, l, p, 'available', s, r, n "
                 "FROM unnest(CAST(:labels AS text[]), CAST(:prices AS int[]), "
                 "CAST(:sections AS text[]), CAST(:rows AS text[]), CAST(:numbers AS int[])) "
-                "AS t(l, p, s, r, n)"
+                "WITH ORDINALITY AS t(l, p, s, r, n, i) ORDER BY i"
             ),
             {
                 "event": event.id,
