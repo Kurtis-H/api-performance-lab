@@ -69,8 +69,56 @@ class Order(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # What was paid: the seats and products, less any discount.
     total_cents: Mapped[int] = mapped_column(Integer)
+    discount_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    promo_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Product(Base):
+    """Something sold besides seats: an add-on for one event, or merch (no event)."""
+
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("events.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(String(200), default="")
+    category: Mapped[str] = mapped_column(String(20))
+    price_cents: Mapped[int] = mapped_column(Integer)
+    # How many are left; None means there's no limit.
+    stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_per_order: Mapped[int] = mapped_column(Integer, default=10)
+
+
+class OrderProduct(Base):
+    __tablename__ = "order_products"
+    __table_args__ = (Index("ix_order_products_order", "order_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    # The unit price paid, so later price changes don't rewrite old orders.
+    price_cents: Mapped[int] = mapped_column(Integer)
+
+
+class PromoCode(Base):
+    """A discount: a percentage or a fixed amount off, on seats, products or both."""
+
+    __tablename__ = "promo_codes"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    percent_off: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount_off_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    applies_to: Mapped[str] = mapped_column(String(10), default="all")
+    min_total_cents: Mapped[int] = mapped_column(Integer, default=0)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SeatHold(Base):
@@ -222,11 +270,24 @@ def _add_seat_layout(engine: Engine) -> None:
         )
 
 
+def _add_order_discounts(engine: Engine) -> None:
+    """Migrate a database from before the shop: orders gain a discount and a promo code."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE orders "
+                "ADD COLUMN IF NOT EXISTS discount_cents INTEGER NOT NULL DEFAULT 0, "
+                "ADD COLUMN IF NOT EXISTS promo_code VARCHAR(20)"
+            )
+        )
+
+
 def init_db(engine: Engine, with_seat_index: bool = True) -> None:
     """Create tables, run the in-place migrations, then add or drop the seat index."""
     Base.metadata.create_all(engine)
     _hash_stored_keys(engine)
     _add_seat_layout(engine)
+    _add_order_discounts(engine)
     with engine.begin() as conn:
         if with_seat_index:
             conn.execute(

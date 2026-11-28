@@ -11,7 +11,7 @@ Everything here is free: Python, Postgres, k6, Prometheus, Grafana, Schemathesis
 
 ## The six problems
 
-Measured with k6 against 1,000 events and **1,000,000 seats**, 50 virtual users, unless noted.
+Measured with k6 against 1,000 events and **1,000,000 seats**, 50 virtual users, unless noted. The last three are correctness races, measured with pytest.
 
 | Problem | Switch on | What it does to the API | Caught by |
 |---|---|---|---|
@@ -21,8 +21,11 @@ Measured with k6 against 1,000 events and **1,000,000 seats**, 50 virtual users,
 | [No page limit](docs/problems/no-page-limit.md) | `no_page_limit` | seat map p95 41 → 379 ms; slows every endpoint | pytest, Postman (OWASP API4), k6 budgets |
 | [Double booking](docs/problems/race-condition.md) | `race` | 40 of 50 buyers get the same seat; normal load tests see **nothing** | 50-buyer contention test (pytest and k6) |
 | [Cache stampede](docs/problems/cache-stampede.md) | `cache_stampede` | 310 report recomputes instead of 8; latency looks normal | recompute counter (pytest and k6 flash crowd) |
+| [Two holders, one seat](docs/problems/hold-race.md) | `hold_race` | 2 to 11 of 20 buyers hold the same seat | 20-holder contention test, 5 rounds (pytest) |
+| [Overselling the last item](docs/problems/oversell.md) | `oversell` | 10 to 15 of 30 buyers get the last shirt; stock still reads 0 | 30-buyer contention test (pytest) |
+| [One-use code used many times](docs/problems/promo-race.md) | `promo_race` | a single-use code is used up to 20 times; its counter still reads 1 | 20-buyer contention test (pytest) |
 
-Three of the six don't show up in a normal load test at all. Each page explains which kind of test does catch it, and why.
+Six of the nine don't show up in a normal load test at all. Each page explains which kind of test does catch it, and why.
 
 ## The tests
 
@@ -33,7 +36,7 @@ Three of the six don't show up in a normal load test at all. Each page explains 
 | Contract and fuzzing | [Schemathesis](https://schemathesis.readthedocs.io/) | Every response matches the OpenAPI spec, for generated valid *and* invalid requests |
 | Concurrency | pytest, 50 threads on a barrier | 50 buyers, 1 seat: exactly 1 succeeds |
 | Failure handling | pytest, with a locked table and an unreachable database | A lock fails fast with `503`, an outage is `503` with `Retry-After`, `/ready` follows the database. Fault injection against the deployed stack is in [resilience-lab](https://github.com/Kurtis-H/resilience-lab) |
-| End to end | Postman collection run by Newman | A tester's walkthrough with 47 assertions |
+| End to end | Postman collection run by Newman | A tester's walkthrough with 57 assertions |
 | Consumer contracts | [Pact](https://docs.pact.io/) | Replays the contracts [booking-web](https://github.com/Kurtis-H/booking-web) and [booking-mobile](https://github.com/Kurtis-H/booking-mobile) record, so a change that would break either app fails here first |
 | Load | k6 | Smoke, load, stress, spike, soak, race and flash-crowd scenarios with thresholds |
 | Regression gate | `perf/compare.py` | Fails CI if queries per request rise at all, or p95 latency more than doubles |
@@ -142,6 +145,36 @@ A buyer can hold up to 10 seats for 10 minutes (`HOLD_SECONDS`), so no one else 
 * **Cost:** each order makes one extra query (7 to 8) to check holds.
 
 **Checking holds can't be folded into the seat lock.** It's tempting to join the holds into the `SELECT ... FOR UPDATE` that locks the seats and save the query. But under READ COMMITTED, a query that waited for a lock re-checks only the locked rows, so it misses a hold another buyer committed meanwhile. I tried it: with the join, 3 to 5 of 20 buyers holding one seat at the same instant all "won", and `test_twenty_buyers_hold_one_seat_at_once_exactly_one_gets_it` failed. The check now runs as its own statement after the lock, and a second race test pits a hold against an order 10 times.
+
+## Shop and promo codes
+
+Besides seats, the API sells add-ons for an event (parking, drink vouchers, a program) and merch (a T-shirt, a poster, a tote bag), with optional limited stock and a per-order maximum. One order can have seats, products or both, and one promo code.
+
+| Request | What it does |
+|---|---|
+| `GET /events/{id}/products` | An event's add-ons, with how many are left |
+| `GET /products` | Merch |
+| `POST /quote` | What a basket costs with a promo code applied, without buying it |
+| `POST /orders` `{"seat_ids": [...], "products": [{"product_id": 7, "quantity": 2}], "promo_code": "WELCOME10"}` | Buy it. The order shows seats, products, the discount and the code |
+| `POST /admin/products`, `POST /admin/promo-codes` | Add products and codes (admins only) |
+
+The rules, each with a test:
+
+* **Prices come from the server.** An order that sends its own `price_cents` is refused (422), along with zero or negative quantities.
+* **Add-ons need a ticket.** Parking for an event needs a seat at that event, in the same order or one you've already bought.
+* **Stock can't be oversold.** Product rows are locked before stock is checked, and 30 buyers racing for the last shirt get exactly one shirt.
+* **Promo codes.** A code takes a percentage or a fixed amount off, on seats, products or everything. It can have a minimum order, an expiry and a use limit. Codes are case-insensitive.
+  * A percentage is rounded down to the cent, so 10% of $33.33 is $3.33, never more than promised.
+  * A fixed amount never takes off more than what it applies to.
+  * A use limit holds under a race: 20 buyers with a single-use code get exactly one discount.
+* **Quotes don't drift from orders.** A quote prices the basket with the same code as the order, and a test places the order and checks the totals match.
+* **A failed order takes nothing.** Stock, seats and promo uses only change if the whole order succeeds.
+
+Demo codes in the seed data: `WELCOME10` (10% off everything), `SEATS20` (20% off seats), `SHOP5` ($5 off add-ons and merch over $20) and `EXPIRED`.
+
+An order of seats alone costs no extra queries: the product and promo lookups only run when an order has them. Rows are locked in one order everywhere (seats, the buyer, products, then the promo code), so orders and holds can't deadlock.
+
+**The fuzzer found two crashes on the first run.** Product and event ids are 32-bit in Postgres, but the request schema allowed up to 2^53, so a large id made the database fail (500) instead of answering 404. Schemathesis generated exactly that id within seconds.
 
 ## Security
 

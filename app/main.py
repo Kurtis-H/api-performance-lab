@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated, Any, ParamSpec, TypeVar
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
@@ -23,12 +24,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Match
 
+from app import shop
 from app.cache import TTLCache
 from app.config import Settings
 from app.db import (
     Event,
     Order,
     OrderItem,
+    OrderProduct,
+    Product,
+    PromoCode,
     QueryCounter,
     Seat,
     SeatHold,
@@ -55,7 +60,12 @@ from app.schemas import (
     OrderItemOut,
     OrderOut,
     OrderPage,
+    OrderProductOut,
     Problem,
+    ProductIn,
+    ProductOut,
+    PromoIn,
+    Quote,
     SeatOut,
     SeatPage,
     SimpleEventIn,
@@ -91,6 +101,7 @@ AUTH_THROTTLED = Counter(
     "auth_throttled_total", "Requests refused after too many failed authentications"
 )
 BUYER_CAP_HIT = Counter("buyer_cap_refusals_total", "Orders refused by the per-buyer seat cap")
+PROMO_USES = Counter("promo_uses_total", "Orders placed with a promo code")
 HOLDS_PLACED = Counter("holds_placed_total", "Seat holds placed or replaced")
 HOLD_CONFLICTS = Counter(
     "hold_conflicts_total", "Holds and orders refused because another buyer held a seat"
@@ -507,27 +518,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses={
             **AUTH_RESPONSES,
             **BAD_BODY,
-            404: {"model": Problem, "description": "A seat does not exist"},
-            409: {"model": Problem, "description": "A seat is already taken"},
+            404: {"model": Problem, "description": "A seat or product does not exist"},
+            409: {
+                "model": Problem,
+                "description": "A seat is taken, a product is out of stock, a limit is hit, "
+                "or the promo code can't be used",
+            },
         },
         tags=["orders"],
     )
     @releases_connection
     def create_order(body: OrderIn, user: UserDep, session: SessionDep) -> OrderOut:
+        """Buy seats, products or both, with an optional promo code.
+
+        Rows are locked in one order everywhere (seats, the buyer, products,
+        then the promo code), so orders and holds can't deadlock.
+        """
         seat_ids = sorted(set(body.seat_ids))
         if len(seat_ids) != len(body.seat_ids):
             raise HTTPException(409, "The same seat is listed twice")
 
-        if settings.has("race"):
+        seats: list[Seat] = []
+        if seat_ids and settings.has("race"):
             # Problem: race. Read without locking, check, do slow work, then
             # write unconditionally. Two buyers can both pass the check.
             seats = list(session.execute(select(Seat).where(Seat.id.in_(seat_ids))).scalars())
             _check_seats(seats, seat_ids)
             _check_holds(session, user, seat_ids)
             _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
-            _charge_payment(settings)
-            session.execute(update(Seat).where(Seat.id.in_(seat_ids)).values(status="sold"))
-        else:
+        elif seat_ids:
             # Fix: lock the rows (in id order, so overlapping orders can't
             # deadlock) before checking them. A second buyer waits here and then
             # sees the seat as sold.
@@ -540,26 +559,177 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # After the lock, in its own statement: see _check_holds.
             _check_holds(session, user, seat_ids)
             _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
-            _charge_payment(settings)
+
+        # The shop costs no queries for an order of seats alone.
+        # Problem oversell / promo_race: read without locking (the switches
+        # exist to prove the race tests catch it).
+        lines = shop.load_products(session, body.products, lock=not settings.has("oversell"))
+        shop.check_add_ons(session, user.id, lines, {seat.event_id for seat in seats})
+        promo = shop.find_promo(session, body.promo_code, lock=not settings.has("promo_race"))
+        priced = shop.price(sum(seat.price_cents for seat in seats), lines, promo)
+
+        _charge_payment(settings)
+        if seat_ids and settings.has("race"):
+            session.execute(update(Seat).where(Seat.id.in_(seat_ids)).values(status="sold"))
+        else:
             for seat in seats:
                 seat.status = "sold"
+        for line in lines:
+            if line.product.stock is not None:
+                line.product.stock -= line.quantity
+        if promo is not None:
+            promo.uses += 1
+            PROMO_USES.inc()
 
-        order = Order(user_id=user.id, total_cents=sum(s.price_cents for s in seats))
+        order = Order(
+            user_id=user.id,
+            total_cents=priced.total_cents,
+            discount_cents=priced.discount_cents,
+            promo_code=promo.code if promo else None,
+        )
         session.add(order)
         session.flush()
         session.add_all(
             OrderItem(order_id=order.id, seat_id=s.id, price_cents=s.price_cents) for s in seats
         )
+        session.add_all(
+            OrderProduct(
+                order_id=order.id,
+                product_id=line.product.id,
+                quantity=line.quantity,
+                price_cents=line.product.price_cents,
+            )
+            for line in lines
+        )
         session.commit()
         ORDERS_CREATED.inc()
-        return OrderOut(
-            id=order.id,
-            total_cents=order.total_cents,
-            created_at=order.created_at,
-            items=[
-                OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats
+        return _order_out(
+            order,
+            [OrderItemOut(seat_id=s.id, label=s.label, price_cents=s.price_cents) for s in seats],
+            [
+                OrderProductOut(
+                    product_id=line.product.id,
+                    name=line.product.name,
+                    quantity=line.quantity,
+                    price_cents=line.product.price_cents,
+                )
+                for line in lines
             ],
         )
+
+    @app.post(
+        "/quote",
+        response_model=Quote,
+        responses={
+            **AUTH_RESPONSES,
+            **BAD_BODY,
+            404: {"model": Problem, "description": "A seat or product does not exist"},
+            409: {
+                "model": Problem,
+                "description": "A limit is hit or the promo code can't be used",
+            },
+        },
+        tags=["orders"],
+    )
+    @releases_connection
+    def quote(body: OrderIn, user: UserDep, session: SessionDep) -> Quote:
+        """What this order would cost, with the promo code applied, without placing it.
+
+        Checks products, stock and the promo code the way an order does. Seats
+        only have to exist: whether they're still free is settled when you buy.
+        """
+        seat_ids = sorted(set(body.seat_ids))
+        seats = list(session.scalars(select(Seat).where(Seat.id.in_(seat_ids)))) if seat_ids else []
+        if len(seats) != len(body.seat_ids):
+            raise HTTPException(404, "One or more seats do not exist")
+        lines = shop.load_products(session, body.products, lock=False)
+        shop.check_add_ons(session, user.id, lines, {seat.event_id for seat in seats})
+        promo = shop.find_promo(session, body.promo_code, lock=False)
+        priced = shop.price(sum(seat.price_cents for seat in seats), lines, promo)
+        return Quote(
+            seats_cents=priced.seats_cents,
+            products_cents=priced.products_cents,
+            subtotal_cents=priced.subtotal_cents,
+            discount_cents=priced.discount_cents,
+            total_cents=priced.total_cents,
+            promo_code=promo.code if promo else None,
+        )
+
+    @app.get(
+        "/events/{event_id}/products",
+        response_model=list[ProductOut],
+        responses=NOT_FOUND,
+        tags=["shop"],
+    )
+    @releases_connection
+    def event_products(event_id: EventId, session: SessionDep) -> list[ProductOut]:
+        """Add-ons for an event, such as parking and drinks. They need a seat at the event."""
+        _require_event(session, event_id)
+        return [
+            _product_out(p)
+            for p in session.scalars(
+                select(Product).where(Product.event_id == event_id).order_by(Product.id)
+            )
+        ]
+
+    @app.get("/products", response_model=list[ProductOut], tags=["shop"])
+    @releases_connection
+    def merch(session: SessionDep) -> list[ProductOut]:
+        """Merch, sold on its own or with seats."""
+        return [
+            _product_out(p)
+            for p in session.scalars(
+                select(Product).where(Product.event_id.is_(None)).order_by(Product.id)
+            )
+        ]
+
+    @app.post(
+        "/admin/products",
+        status_code=201,
+        response_model=ProductOut,
+        responses={
+            **AUTH_RESPONSES,
+            **BAD_BODY,
+            403: {"model": Problem, "description": "Not an admin"},
+            404: {"model": Problem, "description": "The event does not exist"},
+        },
+        tags=["admin"],
+    )
+    @releases_connection
+    def create_product(
+        body: ProductIn,
+        _admin: Annotated[AuthUser, Depends(admin_user)],
+        session: SessionDep,
+    ) -> ProductOut:
+        if body.event_id is not None:
+            _require_event(session, body.event_id)
+        product = Product(**body.model_dump())
+        session.add(product)
+        session.commit()
+        return _product_out(product)
+
+    @app.post(
+        "/admin/promo-codes",
+        status_code=201,
+        responses={
+            **AUTH_RESPONSES,
+            **BAD_BODY,
+            403: {"model": Problem, "description": "Not an admin"},
+            409: {"model": Problem, "description": "The code already exists"},
+        },
+        tags=["admin"],
+    )
+    @releases_connection
+    def create_promo(
+        body: PromoIn,
+        _admin: Annotated[AuthUser, Depends(admin_user)],
+        session: SessionDep,
+    ) -> dict[str, str]:
+        if session.get(PromoCode, body.code) is not None:
+            raise HTTPException(409, "That code already exists")
+        session.add(PromoCode(**body.model_dump()))
+        session.commit()
+        return {"code": body.code}
 
     @app.put(
         "/events/{event_id}/hold",
@@ -586,17 +756,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         seat_ids = sorted(set(body.seat_ids))
         if len(seat_ids) != len(body.seat_ids):
             raise HTTPException(409, "The same seat is listed twice")
-        # Locked in id order, like orders, so holds and orders can't deadlock.
-        seats = list(
-            session.execute(
-                select(Seat)
+        if settings.has("hold_race"):
+            # Problem: hold_race. Read the holds in the same statement that locks
+            # the seats, saving a query. Under READ COMMITTED the statement that
+            # waited for the lock still sees the holds from before it waited.
+            rows = session.execute(
+                select(Seat, SeatHold.user_id, SeatHold.expires_at)
+                .outerjoin(SeatHold, SeatHold.seat_id == Seat.id)
                 .where(Seat.id.in_(seat_ids), Seat.event_id == event_id)
                 .order_by(Seat.id)
-                .with_for_update()
-            ).scalars()
-        )
-        _check_seats(seats, seat_ids)
-        _check_holds(session, user, seat_ids)
+                .with_for_update(of=Seat)
+            ).all()
+            seats = [row[0] for row in rows]
+            _check_seats(seats, seat_ids)
+            now = datetime.now(UTC)
+            if any(u not in (None, user.id) and e > now for _, u, e in rows):
+                raise HTTPException(409, HELD_BY_ANOTHER)
+        else:
+            # Fix: lock the seats (in id order, like orders, so holds and
+            # orders can't deadlock), then check holds in a statement of its own.
+            seats = list(
+                session.execute(
+                    select(Seat)
+                    .where(Seat.id.in_(seat_ids), Seat.event_id == event_id)
+                    .order_by(Seat.id)
+                    .with_for_update()
+                ).scalars()
+            )
+            _check_seats(seats, seat_ids)
+            _check_holds(session, user, seat_ids)
         _check_buyer_cap(session, user, seats, settings.max_seats_per_buyer_per_event)
         # Any hold rows left on these seats are expired or ours.
         session.execute(
@@ -694,16 +882,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 items_by_order[item.order_id].append(
                     OrderItemOut(seat_id=item.seat_id, label=label, price_cents=item.price_cents)
                 )
+        products_by_order = _order_products(session, [o.id for o in orders])
         return OrderPage(
-            items=[
-                OrderOut(
-                    id=o.id,
-                    total_cents=o.total_cents,
-                    created_at=o.created_at,
-                    items=items_by_order[o.id],
-                )
-                for o in orders
-            ],
+            items=[_order_out(o, items_by_order[o.id], products_by_order[o.id]) for o in orders],
             limit=limit,
             offset=offset,
         )
@@ -727,14 +908,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .where(OrderItem.order_id == order.id)
             .order_by(OrderItem.id)
         )
-        return OrderOut(
-            id=order.id,
-            total_cents=order.total_cents,
-            created_at=order.created_at,
-            items=[
+        return _order_out(
+            order,
+            [
                 OrderItemOut(seat_id=i.seat_id, label=label, price_cents=i.price_cents)
                 for i, label in items
             ],
+            _order_products(session, [order.id])[order.id],
         )
 
     @app.post(
@@ -831,6 +1011,55 @@ def _check_seats(seats: list[Seat], wanted: list[int]) -> None:
     if any(seat.status != "available" for seat in seats):
         ORDER_CONFLICTS.inc()
         raise HTTPException(409, "One or more seats are already taken")
+
+
+def _product_out(product: Product) -> ProductOut:
+    return ProductOut(
+        id=product.id,
+        event_id=product.event_id,
+        name=product.name,
+        description=product.description,
+        category=product.category,
+        price_cents=product.price_cents,
+        stock_left=product.stock,
+        max_per_order=product.max_per_order,
+    )
+
+
+def _order_out(
+    order: Order, items: list[OrderItemOut], products: list[OrderProductOut]
+) -> OrderOut:
+    return OrderOut(
+        id=order.id,
+        total_cents=order.total_cents,
+        created_at=order.created_at,
+        items=items,
+        products=products,
+        discount_cents=order.discount_cents,
+        promo_code=order.promo_code,
+    )
+
+
+def _order_products(session: Session, order_ids: list[int]) -> dict[int, list[OrderProductOut]]:
+    """Every order's product lines, in one query."""
+    lines: dict[int, list[OrderProductOut]] = {order_id: [] for order_id in order_ids}
+    if not order_ids:
+        return lines
+    for line, name in session.execute(
+        select(OrderProduct, Product.name)
+        .join(Product, Product.id == OrderProduct.product_id)
+        .where(OrderProduct.order_id.in_(order_ids))
+        .order_by(OrderProduct.id)
+    ):
+        lines[line.order_id].append(
+            OrderProductOut(
+                product_id=line.product_id,
+                name=name,
+                quantity=line.quantity,
+                price_cents=line.price_cents,
+            )
+        )
+    return lines
 
 
 def _check_holds(session: Session, user: AuthUser, seat_ids: list[int]) -> None:

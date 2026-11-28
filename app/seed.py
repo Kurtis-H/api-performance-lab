@@ -29,7 +29,8 @@ def reset(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE seat_holds, order_items, orders, seats, events, users "
+                "TRUNCATE promo_codes, order_products, products, seat_holds, order_items, orders, "
+                "seats, events, users "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -76,6 +77,63 @@ def seed(engine: Engine, events: int, seats_per_event: int, users: int) -> None:
             ),
             {"n": seats_per_event},
         )
+    seed_shop(engine)
+
+
+# Promo codes a demo can use. EXPIRED is there to try out the error.
+PROMO_CODES = [
+    {"code": "WELCOME10", "percent_off": 10, "applies_to": "all"},
+    {"code": "SEATS20", "percent_off": 20, "applies_to": "seats", "max_uses": 500},
+    {"code": "SHOP5", "amount_off_cents": 500, "applies_to": "products", "min_total_cents": 2000},
+    {"code": "EXPIRED", "percent_off": 50, "expires_at": "2026-01-01T00:00:00+00:00"},
+]
+
+
+def seed_shop(engine: Engine) -> None:
+    """Add-ons for every event, a little merch, and the demo promo codes."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO products "
+                "(event_id, name, description, category, price_cents, stock, max_per_order) "
+                "SELECT e.id, v.name, v.description, v.category, v.price, v.stock, v.max "
+                "FROM events e CROSS JOIN (VALUES "
+                "  ('Parking', 'One car, in the venue lot', 'parking', 1500, 40, 2), "
+                "  ('Drink voucher', 'Any drink at the bar', 'food', 800, NULL, 10), "
+                "  ('Program', 'The printed program', 'merch', 500, 100, 4)"
+                ") AS v(name, description, category, price, stock, max) "
+                "ORDER BY e.id"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO products "
+                "(event_id, name, description, category, price_cents, stock, max_per_order) "
+                "VALUES "
+                "(NULL, 'Tour T-shirt', 'Soft cotton, one size', 'merch', 2500, 50, 4), "
+                "(NULL, 'Poster', 'A2, signed by the house band', 'merch', 1200, 100, 4), "
+                "(NULL, 'Tote bag', 'Canvas, with the season line-up', 'merch', 1800, NULL, 4)"
+            )
+        )
+        for promo in PROMO_CODES:
+            conn.execute(
+                text(
+                    "INSERT INTO promo_codes "
+                    "(code, percent_off, amount_off_cents, applies_to, min_total_cents, "
+                    " max_uses, uses, expires_at) "
+                    "VALUES (:code, :percent_off, :amount_off_cents, :applies_to, "
+                    " :min_total_cents, :max_uses, 0, CAST(:expires_at AS timestamptz))"
+                ),
+                {
+                    "percent_off": None,
+                    "amount_off_cents": None,
+                    "applies_to": "all",
+                    "min_total_cents": 0,
+                    "max_uses": None,
+                    "expires_at": None,
+                    **promo,
+                },
+            )
 
 
 def warm(engine: Engine) -> None:
