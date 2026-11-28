@@ -41,6 +41,7 @@ from app.keys import hash_key
 from app.ratelimit import RateLimiter
 from app.schemas import (
     MAX_JSON_INT,
+    ROW_LETTERS,
     EventCreated,
     EventIn,
     EventOut,
@@ -54,6 +55,7 @@ from app.schemas import (
     Problem,
     SeatOut,
     SeatPage,
+    SimpleEventIn,
 )
 
 MAX_PAGE = 100
@@ -426,7 +428,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .offset(page.offset)
         ).scalars()
         items = [
-            SeatOut(id=s.id, label=s.label, price_cents=s.price_cents, status=s.status)
+            SeatOut(
+                id=s.id,
+                label=s.label,
+                price_cents=s.price_cents,
+                status=s.status,
+                section=s.section,
+                row=s.row,
+                number=s.number,
+            )
             for s in seats
         ]
         debug_buffer.append({"event_id": event_id, "seats": [i.model_dump() for i in items]})
@@ -620,21 +630,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event = Event(name=body.name, venue=body.venue, starts_at=body.starts_at)
         session.add(event)
         session.flush()
+        layout = _layout(body)
+        # One statement for every seat, however many sections: arrays unnested
+        # side by side, so creating an event costs the same queries as before.
         session.execute(
             text(
-                "INSERT INTO seats (event_id, label, price_cents, status) "
-                "SELECT :event, 'S-' || g, :price, 'available' "
-                "FROM generate_series(1, :n) AS g"
+                "INSERT INTO seats "
+                "(event_id, label, price_cents, status, section, seat_row, seat_number) "
+                "SELECT :event, l, p, 'available', s, r, n "
+                "FROM unnest(CAST(:labels AS text[]), CAST(:prices AS int[]), "
+                "CAST(:sections AS text[]), CAST(:rows AS text[]), CAST(:numbers AS int[])) "
+                "AS t(l, p, s, r, n)"
             ),
-            {"event": event.id, "price": body.price_cents, "n": body.seats},
+            {
+                "event": event.id,
+                "labels": [f"{row}-{n}" for _, row, n, _ in layout],
+                "prices": [price for *_, price in layout],
+                "sections": [section for section, *_ in layout],
+                "rows": [row for _, row, _, _ in layout],
+                "numbers": [n for _, _, n, _ in layout],
+            },
         )
         session.commit()
-        return EventCreated(id=event.id, seats=body.seats)
+        return EventCreated(id=event.id, seats=len(layout))
 
     return app
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _layout(body: EventIn) -> list[tuple[str, str, int, int]]:
+    """Every seat of a new event as (section, row, number, price), in seating order.
+
+    Simple events are one row "S" in section "General" (labels S-1, S-2, ...).
+    Layouts take row letters in order across sections, front to back.
+    """
+    if isinstance(body, SimpleEventIn):
+        return [("General", "S", n, body.price_cents) for n in range(1, body.seats + 1)]
+    seats = []
+    letters = iter(ROW_LETTERS)
+    for section in body.sections:
+        for _ in range(section.rows):
+            row = next(letters)
+            seats += [
+                (section.name, row, n, section.price_cents)
+                for n in range(1, section.seats_per_row + 1)
+            ]
+    return seats
 
 
 def _event_out(event: Event, available: int) -> EventOut:

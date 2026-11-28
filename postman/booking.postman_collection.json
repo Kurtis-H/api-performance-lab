@@ -401,6 +401,88 @@
       ]
     },
     {
+      "name": "Venue layouts",
+      "item": [
+        {
+          "name": "Admin creates a theater layout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "pm.test(\"counts every seat in every section\", () => pm.expect(pm.response.json().seats).to.eql(7));",
+                  "pm.collectionVariables.set(\"layoutEventId\", pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{adminKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "events"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Newman theater night\",\n  \"venue\": \"Postman hall\",\n  \"starts_at\": \"2027-03-02T19:00:00Z\",\n  \"sections\": [\n    {\n      \"name\": \"Orchestra\",\n      \"rows\": 2,\n      \"seats_per_row\": 2,\n      \"price_cents\": 9000\n    },\n    {\n      \"name\": \"Balcony\",\n      \"rows\": 1,\n      \"seats_per_row\": 3,\n      \"price_cents\": 4000\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Seats carry section, row and number",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const seats = pm.response.json().items;",
+                  "pm.test(\"front row is Orchestra row A\", () => pm.expect([seats[0].section, seats[0].row, seats[0].number, seats[0].label]).to.eql([\"Orchestra\", \"A\", 1, \"A-1\"]));",
+                  "const balcony = seats.filter((s) => s.section === \"Balcony\");",
+                  "pm.test(\"Balcony rows carry on from Orchestra\", () => pm.expect(balcony.map((s) => s.row)).to.eql([\"C\", \"C\", \"C\"]));",
+                  "pm.test(\"each section has its own price\", () => pm.expect(balcony.every((s) => s.price_cents === 4000)).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/seats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "seats"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "Security (OWASP API Top 10)",
       "item": [
         {
@@ -595,6 +677,10 @@
     },
     {
       "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "layoutEventId",
       "value": ""
     }
   ]

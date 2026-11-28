@@ -57,6 +57,11 @@ class Seat(Base):
     label: Mapped[str] = mapped_column(String(20))
     price_cents: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(12), default="available")
+    # Where the seat is: section (a price tier), row and number. Columns are
+    # seat_row / seat_number because ROW is an SQL keyword.
+    section: Mapped[str] = mapped_column(String(40), default="General", server_default="General")
+    row: Mapped[str] = mapped_column("seat_row", String(8), default="", server_default="")
+    number: Mapped[int | None] = mapped_column("seat_number", Integer, nullable=True)
 
 
 class Order(Base):
@@ -172,10 +177,36 @@ def _hash_stored_keys(engine: Engine) -> None:
         )
 
 
+def _add_seat_layout(engine: Engine) -> None:
+    """Migrate a database from before venue layouts: add section, row and number.
+
+    Existing seats are labelled "<row>-<number>" (R3-12, S-7), so the row and
+    number are read back out of the label; their section is "General".
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE seats "
+                "ADD COLUMN IF NOT EXISTS section VARCHAR(40) NOT NULL DEFAULT 'General', "
+                "ADD COLUMN IF NOT EXISTS seat_row VARCHAR(8) NOT NULL DEFAULT '', "
+                "ADD COLUMN IF NOT EXISTS seat_number INTEGER"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE seats SET seat_row = split_part(label, '-', 1), "
+                "seat_number = NULLIF("
+                "regexp_replace(split_part(label, '-', 2), '[^0-9]', '', 'g'), '')::int "
+                "WHERE seat_row = '' AND position('-' in label) > 0"
+            )
+        )
+
+
 def init_db(engine: Engine, with_seat_index: bool = True) -> None:
-    """Create tables, migrate stored keys to hashes, then add or drop the seat index."""
+    """Create tables, run the in-place migrations, then add or drop the seat index."""
     Base.metadata.create_all(engine)
     _hash_stored_keys(engine)
+    _add_seat_layout(engine)
     with engine.begin() as conn:
         if with_seat_index:
             conn.execute(

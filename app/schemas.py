@@ -32,6 +32,9 @@ class SeatOut(BaseModel):
     label: str
     price_cents: int
     status: str
+    section: str = Field(description='The price tier the seat is in, such as "Orchestra".')
+    row: str = Field(description='The row, such as "A". Rows run on across sections.')
+    number: int | None = Field(description="The seat's number in its row.")
 
 
 class SeatPage(BaseModel):
@@ -104,12 +107,55 @@ class OrderPage(BaseModel):
     offset: int
 
 
-class EventIn(StrictModel):
+MAX_SEATS_PER_EVENT = 1000
+# Theater row letters: I and O are skipped, as they're easy to misread as 1 and 0.
+ROW_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+MAX_SECTIONS = 4
+MAX_ROWS_PER_SECTION = 6
+MAX_SEATS_PER_ROW = 40
+# The bounds are chosen so that every layout the spec allows fits: there are
+# enough row letters, and no event goes over the seat limit. That keeps the
+# OpenAPI spec the whole contract, with no hidden rules for clients to trip on.
+assert len(ROW_LETTERS) >= MAX_SECTIONS * MAX_ROWS_PER_SECTION
+assert MAX_SECTIONS * MAX_ROWS_PER_SECTION * MAX_SEATS_PER_ROW <= MAX_SEATS_PER_EVENT
+
+Price = Annotated[int, Field(ge=0, le=1_000_000), WholeNumber]
+
+
+class SectionIn(StrictModel):
+    """One price tier of a venue: a block of rows, all at one price."""
+
+    name: Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[^\x00]+$")]
+    rows: Annotated[int, Field(ge=1, le=MAX_ROWS_PER_SECTION), WholeNumber]
+    seats_per_row: Annotated[int, Field(ge=1, le=MAX_SEATS_PER_ROW), WholeNumber]
+    price_cents: Price
+
+
+class SimpleEventIn(StrictModel):
+    """An event with one block of seats at one price, in row "S"."""
+
     name: SafeText
     venue: SafeText
     starts_at: IsoDateTime
-    seats: Annotated[int, Field(ge=1, le=1000), WholeNumber]
-    price_cents: Annotated[int, Field(ge=0, le=1_000_000), WholeNumber]
+    seats: Annotated[int, Field(ge=1, le=MAX_SEATS_PER_EVENT), WholeNumber]
+    price_cents: Price
+
+
+class LayoutEventIn(StrictModel):
+    """An event with a venue layout: sections front to back, each a price tier.
+
+    Row letters run on across sections, so the second section starts where the
+    first ended.
+    """
+
+    name: SafeText
+    venue: SafeText
+    starts_at: IsoDateTime
+    sections: Annotated[list[SectionIn], Field(min_length=1, max_length=MAX_SECTIONS)]
+
+
+# Unknown fields are refused, so a body matches exactly one of the two shapes.
+EventIn = SimpleEventIn | LayoutEventIn
 
 
 class EventCreated(BaseModel):

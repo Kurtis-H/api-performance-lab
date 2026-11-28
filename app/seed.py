@@ -57,12 +57,18 @@ def seed(engine: Engine, events: int, seats_per_event: int, users: int) -> None:
             ),
             {"n": events},
         )
-        # Prices vary by row so revenue reports have something to add up.
+        # Rows of 20. Prices vary by row so revenue reports have something to
+        # add up, and the front rows form an Orchestra section, the next a
+        # Mezzanine and the rest a Balcony, like a real venue.
         conn.execute(
             text(
-                "INSERT INTO seats (event_id, label, price_cents, status) "
+                "INSERT INTO seats "
+                "(event_id, label, price_cents, status, section, seat_row, seat_number) "
                 "SELECT e.id, 'R' || ((g - 1) / 20 + 1) || '-' || ((g - 1) % 20 + 1), "
-                "       2500 + ((g - 1) / 20) * 500, 'available' "
+                "       2500 + ((g - 1) / 20) * 500, 'available', "
+                "       CASE WHEN (g - 1) / 20 < 4 THEN 'Orchestra' "
+                "            WHEN (g - 1) / 20 < 8 THEN 'Mezzanine' ELSE 'Balcony' END, "
+                "       'R' || ((g - 1) / 20 + 1), (g - 1) % 20 + 1 "
                 "FROM events e CROSS JOIN generate_series(1, :n) AS g"
             ),
             {"n": seats_per_event},
