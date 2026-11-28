@@ -20,6 +20,9 @@ KNOWN_BUGS: dict[str, str] = {
     "no_page_limit": "List endpoints accept any limit and return everything by default",
     "race": "Orders check seats then write later, so two buyers can get the same seat",
     "cache_stampede": "When the stats cache expires, every waiting request recomputes it",
+    "hold_race": "Holds are checked in the seat-locking query, which misses holds made meanwhile",
+    "oversell": "Product stock is checked without a lock, so the last one sells many times",
+    "promo_race": "Promo uses are checked without a lock, so a one-use code is used many times",
 }
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/booking"

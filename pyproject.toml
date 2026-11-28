@@ -44,6 +44,9 @@ markers = [
     "catches_no_page_limit: fails when PERF_BUGS includes no_page_limit",
     "catches_race: fails when PERF_BUGS includes race",
     "catches_cache_stampede: fails when PERF_BUGS includes cache_stampede",
+    "catches_hold_race: fails when PERF_BUGS includes hold_race",
+    "catches_oversell: fails when PERF_BUGS includes oversell",
+    "catches_promo_race: fails when PERF_BUGS includes promo_race",
 ]
 filterwarnings = ["ignore::DeprecationWarning:schemathesis.*"]
 

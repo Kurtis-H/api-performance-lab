@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import Engine, text
 
 from app.seed import user_key
@@ -129,25 +130,28 @@ def test_bad_holds_are_refused(client: httpx.Client, users, new_event: NewEvent)
     assert hold(client, me, event_id, seats[8:10]).status_code == 200
 
 
+@pytest.mark.catches_hold_race
 def test_twenty_buyers_hold_one_seat_at_once_exactly_one_gets_it(
     base_url: str, client: httpx.Client, new_event: NewEvent
 ) -> None:
-    event_id, seats = new_event(seats=1)
+    # Five rounds: the broken check (hold_race) let two or more holders win in
+    # about two rounds out of three, so one round alone could miss it.
     keys = [user_key(n) for n in range(100, 120)]
-    start = threading.Barrier(len(keys))
-
     with httpx.Client(base_url=base_url, timeout=60) as shared:
+        for _ in range(5):
+            event_id, seats = new_event(seats=1)
+            start = threading.Barrier(len(keys))
 
-        def attempt(key: str) -> int:
-            start.wait()
-            return hold(shared, key, event_id, seats).status_code
+            def attempt(key: str, event_id: int = event_id, start=start, seats=seats) -> int:
+                start.wait()
+                return hold(shared, key, event_id, seats).status_code
 
-        with ThreadPoolExecutor(max_workers=len(keys)) as pool:
-            statuses = list(pool.map(attempt, keys))
+            with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+                statuses = list(pool.map(attempt, keys))
 
-    assert statuses.count(200) == 1, statuses
-    assert statuses.count(409) == len(keys) - 1
-    assert seat_ids(client, event_id, "held") == seats
+            assert statuses.count(200) == 1, statuses
+            assert statuses.count(409) == len(keys) - 1
+            assert seat_ids(client, event_id, "held") == seats
 
 
 def race_hold_and_order(base_url: str, event_id: int, seats: list[int]) -> tuple[int, int]:

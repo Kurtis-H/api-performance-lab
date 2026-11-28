@@ -84,6 +84,34 @@ def states(client: httpx.Client) -> dict[str, Callable[[], dict[str, int]]]:
             ).raise_for_status()
         return {"eventId": event_id, "seatId": seat_ids[0], "rivalSeatId": seat_ids[1]}
 
+    def shop_open() -> dict[str, int]:
+        # An event with seats and an add-on, and a merch item.
+        event_id, seat_ids = _new_event(client, 4)
+        add_on = client.post(
+            "/admin/products",
+            headers=ADMIN,
+            json={
+                "event_id": event_id,
+                "name": "Parking",
+                "category": "parking",
+                "price_cents": 1500,
+                "stock": 10,
+            },
+        )
+        add_on.raise_for_status()
+        merch = client.post(
+            "/admin/products",
+            headers=ADMIN,
+            json={"name": "Poster", "category": "merch", "price_cents": 1200, "stock": 10},
+        )
+        merch.raise_for_status()
+        return {
+            "eventId": event_id,
+            "seatId": seat_ids[0],
+            "productId": add_on.json()["id"],
+            "merchId": merch.json()["id"],
+        }
+
     def has_order() -> dict[str, int]:
         _, seat_ids = _new_event(client, 2)
         return {"orderId": _buy(client, BUYER, seat_ids[0])}
@@ -94,6 +122,8 @@ def states(client: httpx.Client) -> dict[str, Callable[[], dict[str, int]]]:
         "a seat has already been sold": sold,
         "the buyer has an order": has_order,
         "the buyer holds a seat": holds_seats,
+        # The seed data has the demo promo codes, such as WELCOME10.
+        "the shop has products": shop_open,
     }
 
 

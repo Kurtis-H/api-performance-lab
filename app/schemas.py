@@ -84,8 +84,37 @@ def _require_text(value: object) -> object:
 IsoDateTime = Annotated[datetime, BeforeValidator(_require_text)]
 
 
-class OrderIn(StrictModel):
+PromoCodeText = Annotated[str, Field(pattern=r"^[A-Za-z0-9-]{3,20}$")]
+# Products and events have Postgres integer ids: anything larger can't exist,
+# and sent to the database it would be an error (a 500), not a 404.
+MAX_INT_ID = 2**31 - 1
+ProductId = Annotated[int, Field(ge=1, le=MAX_INT_ID), WholeNumber]
+
+
+class ProductLineIn(StrictModel):
+    product_id: ProductId
+    quantity: Annotated[int, Field(ge=1, le=10), WholeNumber]
+
+
+class SeatOrderIn(StrictModel):
+    """Seats, with any products alongside."""
+
     seat_ids: list[SeatId] = Field(min_length=1, max_length=10)
+    products: list[ProductLineIn] = Field(default_factory=list, max_length=10)
+    promo_code: PromoCodeText | None = None
+
+
+class ShopOrderIn(StrictModel):
+    """Products only, such as merch, with no seats."""
+
+    seat_ids: list[SeatId] = Field(default_factory=list, max_length=0)
+    products: list[ProductLineIn] = Field(min_length=1, max_length=10)
+    promo_code: PromoCodeText | None = None
+
+
+# An order has seats, products or both. Prices always come from the server:
+# unknown fields such as price_cents are refused.
+OrderIn = SeatOrderIn | ShopOrderIn
 
 
 class HoldIn(StrictModel):
@@ -98,6 +127,65 @@ class HoldOut(BaseModel):
     expires_at: datetime = Field(description="When the hold ends and the seats are free again.")
 
 
+class ProductOut(BaseModel):
+    id: int
+    event_id: int | None = Field(description="The event this is an add-on for; null for merch.")
+    name: str
+    description: str
+    category: str = Field(description='"parking", "food", "merch" and so on.')
+    price_cents: int
+    stock_left: int | None = Field(description="How many are left; null means no limit.")
+    max_per_order: int
+
+
+class ProductIn(StrictModel):
+    event_id: Annotated[int, Field(ge=1, le=MAX_INT_ID), WholeNumber] | None = None
+    name: Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[^\x00]+$")]
+    description: Annotated[str, Field(max_length=200, pattern=r"^[^\x00]*$")] = ""
+    category: Annotated[str, Field(pattern=r"^[a-z]{3,20}$")]
+    price_cents: Price
+    stock: Annotated[int, Field(ge=0, le=1_000_000), WholeNumber] | None = None
+    max_per_order: Annotated[int, Field(ge=1, le=10), WholeNumber] = 10
+
+
+class _PromoBase(StrictModel):
+    code: Annotated[str, Field(pattern=r"^[A-Z0-9-]{3,20}$")]
+    applies_to: Annotated[str, Field(pattern="^(all|seats|products)$")] = "all"
+    min_total_cents: Annotated[int, Field(ge=0, le=10_000_000), WholeNumber] = 0
+    max_uses: Annotated[int, Field(ge=1, le=1_000_000), WholeNumber] | None = None
+    expires_at: IsoDateTime | None = None
+
+
+class PercentPromoIn(_PromoBase):
+    percent_off: Annotated[int, Field(ge=1, le=100), WholeNumber]
+
+
+class AmountPromoIn(_PromoBase):
+    amount_off_cents: Annotated[int, Field(ge=1, le=1_000_000), WholeNumber]
+
+
+# A promo code takes a percentage or an amount off, never both.
+PromoIn = PercentPromoIn | AmountPromoIn
+
+
+class OrderProductOut(BaseModel):
+    product_id: int
+    name: str
+    quantity: int
+    price_cents: int = Field(description="The unit price paid.")
+
+
+class Quote(BaseModel):
+    """What an order would cost, before it's placed."""
+
+    seats_cents: int
+    products_cents: int
+    subtotal_cents: int
+    discount_cents: int
+    total_cents: int
+    promo_code: str | None
+
+
 class OrderItemOut(BaseModel):
     seat_id: int
     label: str = Field(description='The seat as buyers know it, such as "R3-12".')
@@ -106,9 +194,12 @@ class OrderItemOut(BaseModel):
 
 class OrderOut(BaseModel):
     id: int
-    total_cents: int
+    total_cents: int = Field(description="What was paid: seats and products, less any discount.")
     created_at: datetime
-    items: list[OrderItemOut]
+    items: list[OrderItemOut] = Field(description="The seats.")
+    products: list[OrderProductOut] = Field(default_factory=list)
+    discount_cents: int = 0
+    promo_code: str | None = None
 
 
 class OrderPage(BaseModel):

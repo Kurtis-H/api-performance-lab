@@ -30,6 +30,9 @@ SEED_EVENTS = 20
 SEED_SEATS = 50
 SEED_USERS = 150
 EXTRA_ADMIN_KEYS = [f"key-admin-{n}" for n in range(2, 7)]
+# The shop tests set up many products and codes; their own admins keep them
+# clear of the rate limit the other tests' admins share.
+SHOP_ADMIN_KEYS = [f"key-admin-{n}" for n in range(7, 13)]
 
 
 class _Users:
@@ -73,7 +76,7 @@ def engine(settings: Settings) -> Iterator[Engine]:
     reset(eng)
     seed(eng, SEED_EVENTS, SEED_SEATS, SEED_USERS)
     with eng.begin() as conn:
-        for key in EXTRA_ADMIN_KEYS:
+        for key in [*EXTRA_ADMIN_KEYS, *SHOP_ADMIN_KEYS]:
             conn.execute(
                 text("INSERT INTO users (name, api_key_hash, is_admin) VALUES ('Admin', :k, true)"),
                 {"k": hash_key(key)},

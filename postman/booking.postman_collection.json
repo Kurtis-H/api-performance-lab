@@ -707,6 +707,128 @@
       ]
     },
     {
+      "name": "Shop and promo codes",
+      "item": [
+        {
+          "name": "Browse merch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const shirt = pm.response.json().find((p) => p.name === \"Tour T-shirt\");",
+                  "pm.test(\"the T-shirt is for sale at $25\", () => pm.expect(shirt.price_cents).to.eql(2500));",
+                  "pm.test(\"merch belongs to no event\", () => pm.expect(shirt.event_id).to.eql(null));",
+                  "pm.collectionVariables.set(\"merchId\", shirt.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Quote it with a promo code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const q = pm.response.json();",
+                  "pm.test(\"10% off, code read in any case\", () => pm.expect([q.discount_cents, q.total_cents, q.promo_code]).to.eql([250, 2250, \"WELCOME10\"]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{buyerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "quote"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"products\": [{\"product_id\": {{merchId}}, \"quantity\": 1}],\n  \"promo_code\": \"welcome10\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Buy it for the quoted price",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 201\", () => pm.response.to.have.status(201));",
+                  "const o = pm.response.json();",
+                  "pm.test(\"same total as the quote\", () => pm.expect(o.total_cents).to.eql(2250));",
+                  "pm.test(\"one shirt, at the server's price\", () => pm.expect(o.products[0]).to.include({quantity: 1, price_cents: 2500}));",
+                  "pm.test(\"no seats\", () => pm.expect(o.items).to.eql([]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{buyerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"products\": [{\"product_id\": {{merchId}}, \"quantity\": 1}],\n  \"promo_code\": \"welcome10\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "Security (OWASP API Top 10)",
       "item": [
         {
@@ -882,6 +1004,46 @@
               "raw": "{\n  \"name\": \"x\",\n  \"venue\": \"y\",\n  \"starts_at\": \"2027-01-01T00:00:00Z\",\n  \"seats\": 1,\n  \"price_cents\": 1\n}"
             }
           }
+        },
+        {
+          "name": "API3: a price of your own is refused",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 422\", () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{buyerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"products\": [{\"product_id\": {{merchId}}, \"quantity\": 1, \"price_cents\": 1}]\n}"
+            }
+          }
         }
       ]
     }
@@ -909,6 +1071,10 @@
     },
     {
       "key": "holdSeatId",
+      "value": ""
+    },
+    {
+      "key": "merchId",
       "value": ""
     }
   ]
