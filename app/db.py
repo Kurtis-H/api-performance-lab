@@ -73,6 +73,26 @@ class Order(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SeatHold(Base):
+    """A buyer holding a seat for a while, so no one else can buy it.
+
+    A hold ends when it expires (no clean-up job needed: an expired row is
+    simply ignored), when its buyer releases it, or when the seat is sold. Kept
+    out of the seats table so counting available seats stays an index-only
+    scan; holds are few, so subtracting them is cheap.
+    """
+
+    __tablename__ = "seat_holds"
+    __table_args__ = (Index("ix_seat_holds_event", "event_id", "expires_at"),)
+
+    seat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("seats.id", ondelete="CASCADE"), primary_key=True
+    )
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class OrderItem(Base):
     __tablename__ = "order_items"
     __table_args__ = (Index("ix_order_items_order", "order_id"),)

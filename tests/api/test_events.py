@@ -56,7 +56,7 @@ def test_seat_list_filters_by_status(client: httpx.Client, new_event, user) -> N
 
 
 def test_invalid_seat_status_is_rejected(client: httpx.Client) -> None:
-    assert client.get("/events/1/seats", params={"status": "held"}).status_code == 422
+    assert client.get("/events/1/seats", params={"status": "reserved"}).status_code == 422
 
 
 def test_stats_add_up_sales(client: httpx.Client, new_event, user) -> None:

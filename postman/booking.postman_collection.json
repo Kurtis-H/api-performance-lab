@@ -483,6 +483,230 @@
       ]
     },
     {
+      "name": "Seat holds",
+      "item": [
+        {
+          "name": "Pick a seat to hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set(\"holdSeatId\", pm.response.json().items[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/seats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "seats"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Hold it for 10 minutes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const hold = pm.response.json();",
+                  "pm.test(\"holds exactly that seat\", () => pm.expect(hold.seat_ids).to.eql([Number(pm.collectionVariables.get(\"holdSeatId\"))]));",
+                  "const minutes = (new Date(hold.expires_at) - Date.now()) / 60000;",
+                  "pm.test(\"for about 10 minutes\", () => pm.expect(minutes).to.be.within(9, 10.1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{buyerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/hold",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "hold"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seat_ids\": [{{holdSeatId}}]\n}"
+            }
+          }
+        },
+        {
+          "name": "Everyone sees it as held",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().items.map((s) => s.id);",
+                  "pm.test(\"listed as held\", () => pm.expect(ids).to.include(Number(pm.collectionVariables.get(\"holdSeatId\"))));",
+                  "pm.test(\"with status held\", () => pm.response.json().items.forEach((s) => pm.expect(s.status).to.eql(\"held\")));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/seats?status=held",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "seats"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "held"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Another buyer can't buy it",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"says why\", () => pm.expect(pm.response.json().detail).to.eql(\"One or more seats are held by another buyer\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{otherBuyerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seat_ids\": [{{holdSeatId}}]\n}"
+            }
+          }
+        },
+        {
+          "name": "Release it",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 204\", () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{buyerKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/hold",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "hold"
+              ]
+            }
+          }
+        },
+        {
+          "name": "It's for sale again",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"available again\", () => pm.expect(pm.response.json().items.map((s) => s.id)).to.include(Number(pm.collectionVariables.get(\"holdSeatId\"))));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{layoutEventId}}/seats",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{layoutEventId}}",
+                "seats"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "Security (OWASP API Top 10)",
       "item": [
         {
@@ -681,6 +905,10 @@
     },
     {
       "key": "layoutEventId",
+      "value": ""
+    },
+    {
+      "key": "holdSeatId",
       "value": ""
     }
   ]

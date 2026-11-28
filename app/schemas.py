@@ -88,6 +88,16 @@ class OrderIn(StrictModel):
     seat_ids: list[SeatId] = Field(min_length=1, max_length=10)
 
 
+class HoldIn(StrictModel):
+    seat_ids: list[SeatId] = Field(min_length=1, max_length=10)
+
+
+class HoldOut(BaseModel):
+    event_id: int
+    seat_ids: list[int] = Field(description="The seats you hold, in seating order.")
+    expires_at: datetime = Field(description="When the hold ends and the seats are free again.")
+
+
 class OrderItemOut(BaseModel):
     seat_id: int
     label: str = Field(description='The seat as buyers know it, such as "R3-12".')

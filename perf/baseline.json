@@ -3,7 +3,7 @@
     "POST /orders": {
       "p50_ms": 72.95,
       "p95_ms": 109.07,
-      "queries_max": 7.0,
+      "queries_max": 8.0,
       "requests": 695.0
     },
     "GET /events": {

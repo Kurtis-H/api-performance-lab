@@ -75,6 +75,15 @@ def states(client: httpx.Client) -> dict[str, Callable[[], dict[str, int]]]:
         _buy(client, RIVAL, seat_ids[0])
         return {"eventId": event_id, "seatId": seat_ids[0]}
 
+    def holds_seats() -> dict[str, int]:
+        # The buyer holds the first seat; a rival holds the second.
+        event_id, seat_ids = _new_event(client, 4)
+        for key, seat_id in [(BUYER, seat_ids[0]), (RIVAL, seat_ids[1])]:
+            client.put(
+                f"/events/{event_id}/hold", headers={"X-API-Key": key}, json={"seat_ids": [seat_id]}
+            ).raise_for_status()
+        return {"eventId": event_id, "seatId": seat_ids[0], "rivalSeatId": seat_ids[1]}
+
     def has_order() -> dict[str, int]:
         _, seat_ids = _new_event(client, 2)
         return {"orderId": _buy(client, BUYER, seat_ids[0])}
@@ -84,6 +93,7 @@ def states(client: httpx.Client) -> dict[str, Callable[[], dict[str, int]]]:
         "an event with available seats exists": available,
         "a seat has already been sold": sold,
         "the buyer has an order": has_order,
+        "the buyer holds a seat": holds_seats,
     }
 
 
